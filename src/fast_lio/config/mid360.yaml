@@ -11,7 +11,7 @@
 
         common:
             lid_topic:  "/livox_merge/merged_pointcloud"   # PointCloud2. 측위 설정과 동일하게 유지
-            imu_topic:  "/livox/imu_192_168_2_102"   # 상단(1번) MID-360 내장 IMU
+            imu_topic:  "/livox/imu_192_168_1_135"   # 상단(livox_top) MID-360 내장 IMU
             time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
             time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
