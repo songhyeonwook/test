@@ -5,46 +5,49 @@ merge_lidar_node:
     slice_z_max: 2.0
 
     lidars.topics:
-      - "/livox/lidar_192_168_2_102"   # lidar_0 = 상단(1번)
-      - "/livox/lidar_192_168_3_144"   # lidar_1
+      - "/livox/lidar_192_168_2_102"   # lidar_0 = livox_front
+      - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
+      # livox_top(192.168.1.135)은 병합에 넣지 않는다. IMU만 쓴다.
 
-    lidars.extrinsics.lidar_0:
-      - 1.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 1.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 1.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 0.0
-      - 1.0
+    lidars.extrinsics.lidar_0:   # base_footprint <- livox_front  (rbio case 2)
+      - 0.000000
+      - -1.000000
+      - 0.000000
+      - 0.300000        # ---
+      - 1.000000
+      - 0.000000
+      - 0.000000
+      - 0.000000        # ---
+      - 0.000000
+      - 0.000000
+      - 1.000000
+      - 0.397000        # ---
+      - 0.000000
+      - 0.000000
+      - 0.000000
+      - 1.000000
 
-    lidars.extrinsics.lidar_1:
-      - -0.244146
-      - -0.00844596
-      - 0.969702
-      - 0.179165
-      - 0.00174144
-      - -0.999964
-      - -0.0082711
-      - -0.0015714
-      - 0.969737
-      - 0.00033068
-      - 0.244152
-      - -0.143879
-      - 0.0
-      - 0.0
-      - 0.0
-      - 1.0
+
+    lidars.extrinsics.lidar_1:   # base_footprint <- livox_rear   (rbio case 3)
+      - 0.000000
+      - 1.000000
+      - 0.000000
+      - -0.980000        # ---
+      - -1.000000
+      - 0.000000
+      - 0.000000
+      - -0.560000        # ---
+      - 0.000000
+      - 0.000000
+      - 1.000000
+      - 0.350000        # ---
+      - 0.000000
+      - 0.000000
+      - 0.000000
+      - 1.000000
+
 
     output.pointcloud2: "/livox_merge/merged_pointcloud"
     output.livox_custom: "/livox_merge/merged_livox"
     output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
-    output.frame_id: "body"
+    output.frame_id: "base_footprint"   # 위 extrinsic 이 실제로 보내는 프레임

@@ -1,19 +1,23 @@
 <?xml version="1.0"?>
 <!--
-  차량 + 센서 장착 형상.
+  차량 + 센서 장착 형상. TF 의 유일한 출처.
 
-  여기가 TF 의 유일한 출처다. 예전에는 msg_Multi_launch.py 안에
-  static_transform_publisher 를 늘어놓았는데, 값이 여러 군데로 흩어지고
-  노드 이름이 겹치는 문제가 있었다.
+  장착값 출처: rbio TransferRobot LidarMountCalibration.cpp defaultMountTransform()
+  회전 합성이 yaw*pitch*roll (= Rz*Ry*Rx) 라 URDF rpy 와 같은 관례다.
 
-  프레임 트리:
-    body ─┬─ livox_frame ─┬─ livox_top ── imu_link
-          │               ├─ livox_front
-          │               └─ livox_rear
-          └─ (base_link 은 여기 없음. tf_2d.py 가 odom 밑에 만든다)
+  트리가 base_footprint 가 아니라 body 에서 시작하는 이유:
+    FAST-LIO 의 "body" 는 차량 기준점이 아니라 IMU 프레임이다.
+    (publish_frame_body 가 RGBpointBodyLidarToIMU 로 변환해서 body 로 stamp)
+    FAST-LIO 가 camera_init->body 를 이미 내보내므로 body 가 이 URDF 의 루트가
+    되어야 하고, 차량 기준점은 그 아래에 매달린다. TF 는 프레임당 부모가
+    하나뿐이라 반대로는 못 짠다.
 
-  body 와 livox_frame 은 같은 지점이다. 드라이버가 포인트클라우드 header 에
-  livox_frame 을 찍기 때문에 이름을 남겨둔다.
+    map ─┬─ camera_init ── body(=IMU, livox_top 내부)
+         │                  └─ base_footprint ─┬─ livox_frame
+         │                                     ├─ livox_top
+         │                                     ├─ livox_front
+         │                                     └─ livox_rear
+         └─ odom ── base_link      <- tf_2d.py 가 base_footprint 를 평면화한 것
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="vehicle">
 
@@ -22,33 +26,25 @@
   <xacro:property name="body_width"  value="0.952"/>
   <xacro:property name="body_height" value="0.60"/>
 
-  <!-- ===== 라이다 장착 ===== -->
-  <!-- front: livox_frame 기준 yaw +90도 -->
-  <xacro:property name="front_xyz" value="0.697 0.35 -0.18"/>
-  <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
-
-  <!-- rear: livox_frame 기준 yaw -90도 -->
-  <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
-  <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
-
-  <!-- top: 옆으로 눕혀 장착(roll -90, yaw 180). 원시 -Y 가 중력 방향이 된다.
-       값 출처: rbio TransferRobot LidarMountCalibration.cpp 의 lidarIndex 1
-         return {0.0f, -0.56f, 1.40f, -90.0f, 0.0f, 180.0f};
-       회전 합성이 yaw*pitch*roll (= Rz*Ry*Rx) 라 URDF rpy 와 같은 관례다.
-
-       주의: 같은 파일의 front/rear 값은 아래 우리 값과 병진이 다르다
-       (rbio 는 base_footprint 기준으로 보인다). 아래 top_xyz 도 그 기준일 수
-       있으므로 RViz 겹쳐보기로 확인이 필요하다. -->
+  <!-- ===== 라이다 장착 (base_footprint 기준, rbio 값) ===== -->
   <xacro:property name="top_xyz"   value="0.0 -0.56 1.40"/>
   <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
 
-  <!-- MID-360 몸통 원점에서 내부 IMU 까지 (Livox 공장값) -->
-  <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
+  <xacro:property name="front_xyz" value="0.30 0.0 0.397"/>
+  <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
 
-  <material name="grey"><color rgba="0.4 0.4 0.4 0.6"/></material>
+  <xacro:property name="rear_xyz"  value="-0.98 -0.56 0.35"/>
+  <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
+
+  <!-- body(=top 라이다 내부 IMU) 에서 본 base_footprint.
+       계산: inverse( T(base_footprint<-top) * T(top<-IMU) )
+       T(top<-IMU) 는 MID-360 공장값 (0.011, 0.02329, -0.04412), 회전 없음. -->
+  <xacro:property name="bf_from_body_xyz" value="-0.011 1.37671 -0.51588"/>
+  <xacro:property name="bf_from_body_rpy" value="${-pi/2} 0 ${-pi}"/>
+
+  <material name="grey"><color rgba="0.4 0.4 0.4 0.5"/></material>
   <material name="orange"><color rgba="0.9 0.5 0.1 1.0"/></material>
 
-  <!-- MID-360 한 대를 붙이는 매크로 -->
   <xacro:macro name="mid360" params="name xyz rpy">
     <link name="${name}">
       <visual>
@@ -56,26 +52,41 @@
         <material name="orange"/>
       </visual>
     </link>
-    <joint name="livox_frame_to_${name}" type="fixed">
-      <parent link="livox_frame"/>
+    <joint name="base_footprint_to_${name}" type="fixed">
+      <parent link="base_footprint"/>
       <child  link="${name}"/>
       <origin xyz="${xyz}" rpy="${rpy}"/>
     </joint>
   </xacro:macro>
 
-  <!-- ===== 차체 ===== -->
-  <link name="body">
+  <!-- ===== 루트: FAST-LIO 가 내보내는 IMU 프레임 ===== -->
+  <link name="body"/>
+
+  <!-- 같은 지점에 대한 별칭. IMU 메시지 시각화용. -->
+  <link name="imu_link"/>
+  <joint name="body_to_imu_link" type="fixed">
+    <parent link="body"/><child link="imu_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== 차량 기준점 (지면) ===== -->
+  <link name="base_footprint">
     <visual>
       <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
-      <origin xyz="0 0 ${body_height/2 - 0.18}"/>
+      <origin xyz="0 0 ${body_height/2}"/>
       <material name="grey"/>
     </visual>
   </link>
+  <joint name="body_to_base_footprint" type="fixed">
+    <parent link="body"/><child link="base_footprint"/>
+    <origin xyz="${bf_from_body_xyz}" rpy="${bf_from_body_rpy}"/>
+  </joint>
 
+  <!-- 드라이버가 원시 클라우드 header 에 찍는 이름. 병합 전이라 기하학적
+       의미는 없고, RViz 가 프레임을 못 찾는 것만 막아준다. -->
   <link name="livox_frame"/>
-  <joint name="body_to_livox_frame" type="fixed">
-    <parent link="body"/>
-    <child  link="livox_frame"/>
+  <joint name="base_footprint_to_livox_frame" type="fixed">
+    <parent link="base_footprint"/><child link="livox_frame"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
@@ -83,13 +94,5 @@
   <xacro:mid360 name="livox_top"   xyz="${top_xyz}"   rpy="${top_rpy}"/>
   <xacro:mid360 name="livox_front" xyz="${front_xyz}" rpy="${front_rpy}"/>
   <xacro:mid360 name="livox_rear"  xyz="${rear_xyz}"  rpy="${rear_rpy}"/>
-
-  <!-- ===== IMU (상단 라이다 내장) ===== -->
-  <link name="imu_link"/>
-  <joint name="livox_top_to_imu" type="fixed">
-    <parent link="livox_top"/>
-    <child  link="imu_link"/>
-    <origin xyz="${imu_xyz}" rpy="0 0 0"/>
-  </joint>
 
 </robot>

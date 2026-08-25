@@ -117,7 +117,10 @@ def generate_launch_description():
             {'odom_2d': 'odom'},
             {'base_2d': 'base_link'},
             {'caminit': 'camera_init'},
-            {'body': 'body'},
+            # FAST-LIO 의 'body' 는 IMU 프레임이라 그대로 평면화하면 base_link 가
+            # 마스트 위(1.4m, 측방 0.56m)에 생긴다. nav2 footprint 가 base_link
+            # 기준 대칭이므로 차량 기준점을 평면화해야 한다.
+            {'body': 'base_footprint'},
             {'rate_hz': 50.0}
         ],
         output='screen'

@@ -51,11 +51,18 @@ MID-360 top ───── /livox/imu_192_168_1_135 ─────────
 TF 트리는 `map` 아래에서 두 갈래로 갈라진다.
 
 ```
-map ─┬─ camera_init ── body ── livox_frame ─┬─ livox_top ── imu_link   (3D, FAST-LIO)
-     │                                      ├─ livox_front
-     │                                      └─ livox_rear
-     └─ odom ── base_link                                             (2D, tf_2d.py)
+map ─┬─ camera_init ── body ─┬─ imu_link                          (3D, FAST-LIO)
+     │                       └─ base_footprint ─┬─ livox_frame
+     │                                          ├─ livox_top
+     │                                          ├─ livox_front
+     │                                          └─ livox_rear
+     └─ odom ── base_link                                        (2D, tf_2d.py)
 ```
+
+**`body` 는 차량 기준점이 아니라 IMU 프레임이다.** FAST-LIO 가 그렇게 정의한다
+(`publish_frame_body` 가 포인트를 IMU 좌표로 바꿔서 `body` 로 stamp). IMU 는
+상단 라이다 안에 있으니 `body` 는 마스트 위 1.4m 지점이다. 차량 기준점은
+`base_footprint` 이고, `tf_2d.py` 가 평면화하는 대상도 이쪽이다.
 
 `body` 아래 가지는 전부 `description` 패키지의 URDF 에서 나온다
 (`robot_state_publisher`). 센서 위치를 바꿀 일이 있으면 `urdf/vehicle.urdf.xacro`

@@ -43,10 +43,15 @@
             fov_degree:    360.0
             det_range:     100.0
             extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
-            extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
-            extrinsic_R: [ 1., 0., 0.,
-                            0., 1., 0.,
-                            0., 0., 1.]
+            # 입력 클라우드는 livox_merge 가 base_footprint 로 보낸 것이고,
+            # IMU 는 livox_top 안에 있다. 그래서 이 값은 한 대짜리 MID-360 의
+            # 공장 오프셋이 아니라 base_footprint -> IMU 전체 변환이다.
+            #   inverse( T(base_footprint<-livox_top) * T(livox_top<-IMU) )
+            # 값이 바뀌면 description/urdf 의 bf_from_body_* 도 같이 바꿔야 한다.
+            extrinsic_T: [ -0.011, 1.37671, -0.51588 ]
+            extrinsic_R: [ -1., 0., 0.,
+                            0., 0., -1.,
+                            0., -1., 0.]
 
         publish:
             path_en: true                # true: publish Path
