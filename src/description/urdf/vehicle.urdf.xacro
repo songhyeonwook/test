@@ -38,12 +38,16 @@
   <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
   <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
 
-  <!-- top: 예전 static TF 에는 이 라이다가 없었다. rbio 값 (0, -0.56, 1.40) 을
-       두 기준의 평균 오프셋 (-0.3885, -0.285, 0.5535) 만큼 되돌린 추정치다.
-       front/rear 각각으로 구한 오프셋이 y 에서 13cm 어긋나므로 이 값의
-       불확실도는 대략 +-(0.01, 0.065, 0.025) 다. 실측하면 여기만 고치면 된다.
-       회전은 실측으로 확인된 값(roll -90, yaw 180). -->
-  <xacro:property name="top_xyz"   value="0.3885 -0.275 0.8465"/>
+  <!-- top: 예전 static TF 에는 이 라이다가 없다.
+       x 는 제약으로 확정: body(=내부 IMU)가 base_footprint 와 x 가 같아야 한다.
+       R_mount * (0.011, 0.02329, -0.04412) = (-0.011, 0.04412, -0.02329) 이므로
+       body_x = top_x - 0.011 = 0  ->  top_x = 0.011.
+
+       y, z 는 아직 추정치다. rbio 값 (0, -0.56, 1.40) 을 front/rear 두 기준의
+       평균 오프셋만큼 되돌린 값이고, front/rear 각각으로 구한 오프셋이 y 에서
+       13cm 어긋나 불확실도가 +-(0.065, 0.025) 다.
+       회전은 실측 확인됨(roll -90, yaw 180). -->
+  <xacro:property name="top_xyz"   value="0.011 -0.275 0.8465"/>
   <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
 
   <!-- body(=top 라이다 내부 IMU) 에서 본 base_footprint.
@@ -51,7 +55,7 @@
        T(top<-IMU) 는 MID-360 공장값 (0.011, 0.02329, -0.04412), 회전 없음.
        top_xyz 를 고치면 이 값과 fast_lio*/config/mid360.yaml 의 extrinsic_T 를
        같이 다시 계산해야 한다. -->
-  <xacro:property name="bf_from_body_xyz" value="0.3775 0.82321 -0.23088"/>
+  <xacro:property name="bf_from_body_xyz" value="0.0 0.82321 -0.23088"/>
   <xacro:property name="bf_from_body_rpy" value="${-pi/2} 0 ${-pi}"/>
 
   <material name="grey"><color rgba="0.4 0.4 0.4 0.5"/></material>
