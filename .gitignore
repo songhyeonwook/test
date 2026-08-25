@@ -1,0 +1,27 @@
+# ---- colcon build artifacts ----
+build/
+install/
+log/
+.colcon_*
+
+# ---- upstream doc media (large binaries, never edited) ----
+*.gif
+*.mp4
+*.pdf
+**/doc/results/
+
+# ---- FAST-LIO mapping outputs (regenerated every run) ----
+ros2_ws/src/FAST_LIO_ROS2/PCD/*.pcd
+ros2_ws/src/FAST_LIO_ROS2/Log/
+
+# ---- rosbags ----
+*.db3
+*.mcap
+rosbag2_*/
+
+# ---- editor / OS ----
+*.swp
+*~
+.vscode/
+__pycache__/
+*.pyc

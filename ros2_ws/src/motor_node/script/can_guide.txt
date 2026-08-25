@@ -1,0 +1,15 @@
+# 1. 데몬 재로드 (새로 만든 서비스 인식)
+sudo systemctl daemon-reload
+
+# 2. 부팅 시 자동 실행되도록 활성화 (중요!)
+sudo systemctl enable can0_setup.service
+
+# 3. 지금 당장 한 번 실행해보기 (테스트)
+sudo systemctl start can0_setup.service
+
+# 서비스 상태 확인 (초록색으로 active (exited) 라고 뜨면 성공)
+sudo systemctl status can0_setup.service
+
+# can0 인터페이스 확인 (UP 상태인지 확인)
+ip -d -s link show can0
+
