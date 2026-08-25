@@ -1,7 +1,0 @@
-image: /home/test/ros2_ws/src/navigation2/nav2_map_server/map/scans.pgm
-mode: trinary
-resolution: 0.05
-origin: [-13.4, -3.77, 0]
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.25
