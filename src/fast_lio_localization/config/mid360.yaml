@@ -48,7 +48,7 @@
             # 공장 오프셋이 아니라 base_footprint -> IMU 전체 변환이다.
             #   inverse( T(base_footprint<-livox_top) * T(livox_top<-IMU) )
             # 값이 바뀌면 description/urdf 의 bf_from_body_* 도 같이 바꿔야 한다.
-            extrinsic_T: [ -0.011, 1.37671, -0.51588 ]
+            extrinsic_T: [ 0.3775, 0.82321, -0.23088 ]
             extrinsic_R: [ -1., 0., 0.,
                             0., 0., -1.,
                             0., -1., 0.]
