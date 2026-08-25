@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 #include <sstream>
+#include <limits>
 
 #include <Eigen/Dense>
 
@@ -46,8 +47,29 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(PointOuster,
                                   (uint16_t, ambient, ambient)
                                   (uint32_t, range, range))
 
+// livox_ros_driver2 가 xfer_format=0 으로 낼 때의 PointCloud2 레이아웃.
+// (bag 으로 기록된 것도 이 형식이다)
+struct PointLivoxPc2
+{
+  PCL_ADD_POINT4D;
+  float intensity;
+  uint8_t tag;
+  uint8_t line;
+  double timestamp;      // 절대시각 [ns]
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+
 typedef pcl::PointCloud<PointOuster> CloudOuster;
 typedef pcl::PointCloud<PointOuster>::Ptr CloudOusterPtr;
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(PointLivoxPc2,
+                                  (float, x, x)
+                                  (float, y, y)
+                                  (float, z, z)
+                                  (float, intensity, intensity)
+                                  (std::uint8_t, tag, tag)
+                                  (std::uint8_t, line, line)
+                                  (double, timestamp, timestamp))
 
 struct CloudPacket
 {
@@ -105,6 +127,8 @@ public:
 
 private:
   std::vector<rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr> lidar_subs_;
+  std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> pc2_subs_;
+  std::string input_type_;
 
   std::mutex lidar_buf_mtx_;
   std::deque<std::deque<CloudPacket>> lidar_buf_;
@@ -146,7 +170,11 @@ private:
     this->declare_parameter<std::string>("output.livox_custom", "/livox_merge/merged_livox");
     this->declare_parameter<std::string>("output.pointcloud2_sliced", "/livox_merge/merged_pointcloud_sliced");
     this->declare_parameter<std::string>("output.frame_id", "body");
+    // "custom"      : livox_ros_driver2/CustomMsg  (xfer_format=1)
+    // "pointcloud2" : sensor_msgs/PointCloud2      (xfer_format=0, bag 기록물)
+    this->declare_parameter<std::string>("input_type", "custom");
 
+    input_type_ = this->get_parameter("input_type").as_string();
     const auto lidar_topics = this->get_parameter("lidars.topics").as_string_array();
     n_lidar_ = static_cast<int>(lidar_topics.size());
 
@@ -184,14 +212,22 @@ private:
       lidar_buf_.push_back({});
       lidar_leftover_buf_.push_back({});
 
-      auto cb = [this, i](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
-        this->pcHandlerLivox(msg, i);
-      };
+      if (input_type_ == "pointcloud2") {
+        auto cb = [this, i](const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+          this->pcHandlerPointCloud2(msg, i);
+        };
+        pc2_subs_.push_back(this->create_subscription<sensor_msgs::msg::PointCloud2>(
+          lidar_topics[i], rclcpp::SensorDataQoS(), cb));
+      } else {
+        auto cb = [this, i](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+          this->pcHandlerLivox(msg, i);
+        };
+        lidar_subs_.push_back(this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+          lidar_topics[i], rclcpp::SensorDataQoS(), cb));
+      }
 
-      lidar_subs_.push_back(this->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-        lidar_topics[i], rclcpp::SensorDataQoS(), cb));
-
-      RCLCPP_INFO(this->get_logger(), "Subscribed lidar %d: %s", i, lidar_topics[i].c_str());
+      RCLCPP_INFO(this->get_logger(), "Subscribed lidar %d: %s (%s)",
+                  i, lidar_topics[i].c_str(), input_type_.c_str());
     }
 
     lidar_channels_ = std::vector<int>(n_lidar_, -1);
@@ -275,6 +311,80 @@ private:
     CloudOusterPtr cloud_in_b(new CloudOuster());
     cloud_in_b->resize(points_total);
 
+    for (int i = 0; i < points_total; ++i) {
+      const auto &point_in_l = cloud_in_l->points[i];
+      Eigen::Vector3d p_l(point_in_l.x, point_in_l.y, point_in_l.z);
+      Eigen::Vector3d p_b = R_B_L_[idx] * p_l + t_B_L_[idx];
+
+      auto point_in_b = point_in_l;
+      point_in_b.x = static_cast<float>(p_b.x());
+      point_in_b.y = static_cast<float>(p_b.y());
+      point_in_b.z = static_cast<float>(p_b.z());
+      point_in_b.ring = static_cast<uint8_t>(point_in_b.ring + lidar_ring_offset_[idx]);
+      cloud_in_b->points[i] = point_in_b;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(lidar_buf_mtx_);
+      lidar_buf_[idx].push_back(CloudPacket(start_time, end_time, cloud_in_b));
+      constexpr std::size_t max_buffer_size = 50;
+      if (lidar_buf_[idx].size() > max_buffer_size) {
+        lidar_buf_[idx].pop_front();
+      }
+    }
+  }
+
+  // xfer_format=0 으로 나온 PointCloud2 를 받는 경로.
+  // CustomMsg 경로(pcHandlerLivox)와 같은 PointOuster 버퍼로 정규화한다.
+  void pcHandlerPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr msg, int idx)
+  {
+    pcl::PointCloud<PointLivoxPc2> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    const int points_total = static_cast<int>(pl_orig.points.size());
+    if (points_total == 0) {
+      RCLCPP_WARN(this->get_logger(), "Received empty cloud from lidar %d", idx);
+      return;
+    }
+
+    // 포인트별 timestamp 는 절대시각[ns] 이다. 프레임 시작을 기준으로 offset 을 만든다.
+    // timestamp 가 0 인 형식이면 header.stamp 로 떨어뜨린다.
+    double ts_min = std::numeric_limits<double>::max();
+    double ts_max = std::numeric_limits<double>::lowest();
+    for (const auto &pt : pl_orig.points) {
+      if (pt.timestamp <= 0.0) continue;
+      ts_min = std::min(ts_min, pt.timestamp);
+      ts_max = std::max(ts_max, pt.timestamp);
+    }
+    const bool has_ts = ts_min <= ts_max;
+    const double header_time = rclcpp::Time(msg->header.stamp).seconds();
+    const double start_time = has_ts ? ts_min * 1e-9 : header_time;
+    const double end_time = has_ts ? ts_max * 1e-9 : header_time + 0.1;
+
+    CloudOusterPtr cloud_in_l(new CloudOuster());
+    cloud_in_l->resize(points_total);
+    for (int i = 0; i < points_total; ++i) {
+      const auto &src = pl_orig.points[i];
+      auto &dst = cloud_in_l->points[i];
+      dst.x = src.x;
+      dst.y = src.y;
+      dst.z = src.z;
+      dst.intensity = src.intensity;
+      dst.reflectivity = static_cast<uint16_t>(src.intensity);
+      dst.t = has_ts ? static_cast<uint32_t>(std::max(0.0, src.timestamp - ts_min)) : 0u;
+      dst.ring = src.line;
+      dst.ambient = 0;
+      dst.range = static_cast<uint32_t>(std::sqrt(src.x * src.x + src.y * src.y + src.z * src.z) * 1000.0);
+    }
+
+    if (!lidar_ring_offset_set_) {
+      lidar_ring_offset_set_ = checkLidarChannel(cloud_in_l, idx);
+    }
+    if (!lidar_ring_offset_set_) {
+      return;
+    }
+
+    CloudOusterPtr cloud_in_b(new CloudOuster());
+    cloud_in_b->resize(points_total);
     for (int i = 0; i < points_total; ++i) {
       const auto &point_in_l = cloud_in_l->points[i];
       Eigen::Vector3d p_l(point_in_l.x, point_in_l.y, point_in_l.z);

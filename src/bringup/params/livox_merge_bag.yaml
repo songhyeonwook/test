@@ -1,0 +1,55 @@
+# bag 재생용 livox_merge 설정.
+# 실장비 설정(src/livox_merge/config/livox_merge_config.yaml)과 extrinsic 은 같고
+# 입력 타입만 다르다. bag 은 xfer_format=0 으로 기록되어 PointCloud2 다.
+/**:
+  ros__parameters:
+    input_type: "pointcloud2"
+
+    sync_frequency: 20.0
+    slice_z_min: -2.0
+    slice_z_max: 2.0
+
+    lidars.topics:
+      - "/livox/lidar_192_168_2_102"   # lidar_0 = livox_front
+      - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
+
+    lidars.extrinsics.lidar_0:   # base_footprint <- livox_front
+      - 0.000000
+      - -1.000000
+      - 0.000000
+      - 0.697000
+      - 1.000000
+      - 0.000000
+      - 0.000000
+      - 0.350000
+      - 0.000000
+      - 0.000000
+      - 1.000000
+      - -0.180000
+      - 0.000000
+      - 0.000000
+      - 0.000000
+      - 1.000000
+
+    lidars.extrinsics.lidar_1:   # base_footprint <- livox_rear
+      - 0.000000
+      - 1.000000
+      - 0.000000
+      - -0.600000
+      - -1.000000
+      - 0.000000
+      - 0.000000
+      - -0.340000
+      - 0.000000
+      - 0.000000
+      - 1.000000
+      - -0.180000
+      - 0.000000
+      - 0.000000
+      - 0.000000
+      - 1.000000
+
+    output.pointcloud2: "/livox_merge/merged_pointcloud"
+    output.livox_custom: "/livox_merge/merged_livox"
+    output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
+    output.frame_id: "base_footprint"
