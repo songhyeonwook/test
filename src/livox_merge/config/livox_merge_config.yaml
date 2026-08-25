@@ -5,8 +5,8 @@ merge_lidar_node:
     slice_z_max: 2.0
 
     lidars.topics:
-      - "/livox/lidar_192_168_1_154"
-      - "/livox/lidar_192_168_1_143"
+      - "/livox/lidar_192_168_2_102"   # lidar_0 = 상단(1번)
+      - "/livox/lidar_192_168_3_144"   # lidar_1
 
     lidars.extrinsics.lidar_0:
       - 1.0

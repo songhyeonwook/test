@@ -9,7 +9,7 @@ PointCloud2 를 쓴다.
 내보내는 것:
   /livox_merge/merged_pointcloud   PointCloud2  -> FAST-LIO 입력 (ouster 포맷)
   /livox_merge/merged_livox        CustomMsg    -> 필요할 때만
-  /livox/imu_192_168_1_154         Imu          -> FAST-LIO 입력 (상단 라이다 내장)
+  /livox/imu_192_168_2_102         Imu          -> FAST-LIO 입력 (상단 라이다 내장)
 """
 import os
 

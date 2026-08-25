@@ -43,8 +43,8 @@ def generate_launch_description():
     
     # IMU는 별도 장비(myahrs)가 아니라 상단 MID-360 내장 IMU를 쓴다.
     # multi_topic=1 이므로 드라이버가 라이다마다 /livox/imu_<ip> 로 따로 낸다.
-    #   /livox/imu_192_168_1_154   <- 상단(1번), FAST-LIO 입력
-    #   /livox/imu_192_168_1_143
+    #   /livox/imu_192_168_2_102   <- 상단(1번), FAST-LIO 입력
+    #   /livox/imu_192_168_3_144
     tf_livox_to_front = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
