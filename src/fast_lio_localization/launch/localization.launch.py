@@ -117,10 +117,11 @@ def generate_launch_description():
             {'odom_2d': 'odom'},
             {'base_2d': 'base_link'},
             {'caminit': 'camera_init'},
-            # FAST-LIO 의 'body' 는 IMU 프레임이라 그대로 평면화하면 base_link 가
-            # 마스트 위(1.4m, 측방 0.56m)에 생긴다. nav2 footprint 가 base_link
-            # 기준 대칭이므로 차량 기준점을 평면화해야 한다.
-            {'body': 'base_footprint'},
+            # FAST-LIO 의 'body' 는 차량 기준점이 아니라 IMU 프레임이고, 상단
+            # 라이다와 함께 누워 있다. 그대로 평면화하면 yaw 가 엉키고 base_link
+            # 가 마스트 위에 생긴다. description 의 fastlio_ref.urdf.xacro 가
+            # body 아래에 차량 정렬된 기준 프레임을 하나 두므로 그걸 쓴다.
+            {'body': 'fastlio_ref'},
             {'rate_hz': 50.0}
         ],
         output='screen'

@@ -2,7 +2,7 @@
 """URDF 와 각 설정 파일의 장착값이 서로 맞는지 검사한다.
 
 같은 기하 정보가 세 군데에 있다:
-  src/description/urdf/vehicle.urdf.xacro     TF (robot_state_publisher)
+  src/description/urdf/mount.xacro            TF 값의 원본 (두 urdf 가 include)
   src/livox_merge/config/livox_merge_config.yaml   포인트 병합
   src/fast_lio*/config/mid360.yaml            FAST-LIO 의 lidar->IMU extrinsic
 
@@ -45,6 +45,7 @@ def urdf_joints(path):
 def main():
     ok = True
     J = urdf_joints('src/description/urdf/vehicle.urdf.xacro')
+    JR = urdf_joints('src/description/urdf/fastlio_ref.urdf.xacro')
 
     def check(label, a, b, tol=1e-4):
         nonlocal ok
@@ -82,7 +83,7 @@ def main():
         check(f"{f} extrinsic_R", R, imu_bf[:3, :3])
 
     print("\nURDF 내부 정합")
-    check("body<-base_footprint", J[('body', 'base_footprint')], imu_bf)
+    check("body<-fastlio_ref (tf_2d 평면화 대상)", JR[('body', 'fastlio_ref')], imu_bf)
 
     f = J[('base_footprint', 'livox_front')][:3, 3]
     r = J[('base_footprint', 'livox_rear')][:3, 3]

@@ -48,28 +48,32 @@ MID-360 top ───── /livox/imu_192_168_1_135 ─────────
                                                    /cmd_vel ─ motor_node
 ```
 
-TF 트리는 `map` 아래에서 두 갈래로 갈라진다.
+TF 트리:
 
 ```
-map ─┬─ camera_init ── body ─┬─ imu_link                          (3D, FAST-LIO)
-     │                       └─ base_footprint ─┬─ livox_frame
-     │                                          ├─ livox_top
-     │                                          ├─ livox_front
-     │                                          └─ livox_rear
-     └─ odom ── base_link                                        (2D, tf_2d.py)
+map ─┬─ odom ── base_link ── base_footprint ─┬─ livox_frame
+     │                                       ├─ livox_top ── imu_link
+     │                                       ├─ livox_front
+     │                                       └─ livox_rear
+     │
+     └─ camera_init ── body ── fastlio_ref       <- FAST-LIO 내부 배관
 ```
 
-**`body` 는 차량 기준점이 아니라 IMU 프레임이다.** FAST-LIO 가 그렇게 정의한다
-(`publish_frame_body` 가 포인트를 IMU 좌표로 바꿔서 `body` 로 stamp). IMU 는
-상단 라이다 안에 있으니 `body` 는 마스트 위 1.4m 지점이다. 차량 기준점은
-`base_footprint` 이고, `tf_2d.py` 가 평면화하는 대상도 이쪽이다.
+**윗줄이 실제로 쓰는 체인이다.** 차량 모델과 센서는 전부 `base_footprint` 아래에
+있고, `map->odom->base_link` 는 `tf_2d.py` 가 낸다.
 
-`body` 아래 가지는 전부 `description` 패키지의 URDF 에서 나온다
-(`robot_state_publisher`). 센서 위치를 바꿀 일이 있으면 `urdf/vehicle.urdf.xacro`
-맨 위의 property 만 고치면 된다.
+아랫줄은 FAST-LIO 가 소유하는 프레임이라 없앨 수 없다. `body` 는 차량 기준점이
+아니라 **IMU 프레임**이고(`publish_frame_body` 가 포인트를 IMU 좌표로 옮겨서
+`body` 로 stamp), 그 IMU 는 상단 라이다 안에서 옆으로 누워 있다. 그대로
+평면화하면 yaw 가 엉키므로 `body` 아래에 차량 정렬된 `fastlio_ref` 를 하나 두고
+`tf_2d.py` 가 그걸 평면화한다. 그 외에는 볼 일이 없다.
 
-**Nav2는 `base_link` 쪽만 본다.** 이게 핵심이다 — `body` 를 보면 z와 roll/pitch가 그대로
-따라 들어와서 코스트맵이 튄다.
+  * `description/urdf/vehicle.urdf.xacro`     윗줄 (RViz 가 보는 모델)
+  * `description/urdf/fastlio_ref.urdf.xacro` 아랫줄 (프레임 하나뿐)
+  * `description/urdf/mount.xacro`            장착값 원본, 둘이 같이 읽는다
+
+센서 위치를 바꾸면 `mount.xacro` 만 고치고 `python3 tools/check_frames.py` 로
+livox_merge / fast_lio 설정과의 정합을 확인한다.
 
 ---
 

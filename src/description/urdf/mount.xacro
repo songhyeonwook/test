@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<!--
+  장착값 한 곳. vehicle.urdf.xacro 와 fastlio_ref.urdf.xacro 가 같이 읽는다.
+  값을 고치면 반드시 tools/check_frames.py 로 livox_merge / fast_lio 설정과의
+  정합을 확인할 것.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 차체 치수 (nav2 footprint 와 같은 실측값) -->
+  <xacro:property name="body_length" value="1.62"/>
+  <xacro:property name="body_width"  value="0.952"/>
+  <xacro:property name="body_height" value="0.60"/>
+
+  <!-- 라이다 장착 (base_footprint 기준). front/rear 는 원점대칭이다. -->
+  <xacro:property name="front_xyz" value="0.697 0.35 -0.18"/>
+  <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
+
+  <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
+  <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
+
+  <!-- top 은 옆으로 눕혀 장착. x, y 는 내부 IMU 가 base_footprint 와 중심좌표를
+       공유하도록 역산한 값이고, z 만 추정치다(오차 +-0.025). -->
+  <xacro:property name="top_xyz"   value="0.011 -0.275 0.8465"/>
+  <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
+
+  <!-- MID-360 몸통 원점 -> 내부 IMU (Livox 공장값) -->
+  <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
+
+  <!-- FAST-LIO 의 body(=IMU) 에서 본 차량 기준점.
+       inverse( T(base_footprint<-livox_top) * T(livox_top<-IMU) ) -->
+  <xacro:property name="ref_from_body_xyz" value="0.0 0.82321 -0.23088"/>
+  <xacro:property name="ref_from_body_rpy" value="${-pi/2} 0 ${-pi}"/>
+
+</robot>
