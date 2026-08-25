@@ -31,10 +31,15 @@
   <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
   <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
 
-  <!-- top: roll -90도, yaw 180도로 눕혀서 장착.
-       TODO 위치(xyz)가 아직 실측 전이다. 0 0 0 은 임시값이므로
-       FAST-LIO 의 extrinsic 을 확정하기 전에 반드시 채워야 한다. -->
-  <xacro:property name="top_xyz"   value="0 0 0"/>
+  <!-- top: 옆으로 눕혀 장착(roll -90, yaw 180). 원시 -Y 가 중력 방향이 된다.
+       값 출처: rbio TransferRobot LidarMountCalibration.cpp 의 lidarIndex 1
+         return {0.0f, -0.56f, 1.40f, -90.0f, 0.0f, 180.0f};
+       회전 합성이 yaw*pitch*roll (= Rz*Ry*Rx) 라 URDF rpy 와 같은 관례다.
+
+       주의: 같은 파일의 front/rear 값은 아래 우리 값과 병진이 다르다
+       (rbio 는 base_footprint 기준으로 보인다). 아래 top_xyz 도 그 기준일 수
+       있으므로 RViz 겹쳐보기로 확인이 필요하다. -->
+  <xacro:property name="top_xyz"   value="0.0 -0.56 1.40"/>
   <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
 
   <!-- MID-360 몸통 원점에서 내부 IMU 까지 (Livox 공장값) -->

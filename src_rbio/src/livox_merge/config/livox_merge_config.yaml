@@ -1,0 +1,50 @@
+merge_lidar_node:
+  ros__parameters:
+    sync_frequency: 20.0
+    slice_z_min: -2.0
+    slice_z_max: 2.0
+
+    lidars.topics:
+    - "/livox/lidar_192_168_2_102"
+    - "/livox/lidar_192_168_3_144"
+
+    lidars.extrinsics.lidar_0:
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+
+    lidars.extrinsics.lidar_1:
+      - -0.244146
+      - -0.00844596
+      - 0.969702
+      - 0.179165
+      - 0.00174144
+      - -0.999964
+      - -0.0082711
+      - -0.0015714
+      - 0.969737
+      - 0.00033068
+      - 0.244152
+      - -0.143879
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+
+    output.pointcloud2: "/livox_merge/merged_pointcloud"
+    output.livox_custom: "/livox_merge/merged_livox"
+    output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
+    output.frame_id: "body"
