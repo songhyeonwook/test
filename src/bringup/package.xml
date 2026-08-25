@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>hw_bringup</name>
+  <name>bringup</name>
   <version>1.0.0</version>
   <description>
     이 PC 한 대의 전체 구동 설정. 센서 -> FAST-LIO 3D 측위 -> 2D 평면화 -> Nav2
@@ -15,7 +15,6 @@
   <!-- 센서 -->
   <exec_depend>livox_ros_driver2</exec_depend>
   <exec_depend>livox_merge</exec_depend>
-  <exec_depend>myahrs_ros2_driver</exec_depend>
 
   <!-- 측위 -->
   <exec_depend>fast_lio_localization</exec_depend>

@@ -29,8 +29,8 @@ from nav2_common.launch import RewrittenYaml
 def generate_launch_description():
     # Get the launch directory
     # nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기서 쓰는 파라미터/behavior tree/
-    # 맵은 전부 hw_bringup 이 들고 있다.
-    bringup_dir = get_package_share_directory('hw_bringup')
+    # 맵은 전부 bringup 이 들고 있다.
+    bringup_dir = get_package_share_directory('bringup')
     default_nav_to_pose_bt_xml = os.path.join(
         bringup_dir, 'behavior_trees', 'navigate_to_pose_vehicle.xml')
     default_nav_through_poses_bt_xml = os.path.join(

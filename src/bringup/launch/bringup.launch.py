@@ -21,7 +21,7 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
-    bringup_dir = get_package_share_directory('hw_bringup')
+    bringup_dir = get_package_share_directory('bringup')
     loc_dir = get_package_share_directory('fast_lio_localization')
 
     sensors = LaunchConfiguration('sensors')

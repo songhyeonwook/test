@@ -13,10 +13,10 @@ from launch_ros.actions import Node
 def generate_launch_description():
     package_path = get_package_share_directory('fast_lio_localization')
     default_config_path = os.path.join(package_path, 'config')
-    # rviz 설정은 이 패키지 안에, 2D 점유맵은 hw_bringup 이 들고 있다.
+    # rviz 설정은 이 패키지 안에, 2D 점유맵은 bringup 이 들고 있다.
     default_rviz_config_path = os.path.join(package_path, 'rviz', 'fastlio_localization.rviz')
     default_map_yaml_path = os.path.join(
-        get_package_share_directory('hw_bringup'), 'maps', 'scans_new.yaml')
+        get_package_share_directory('bringup'), 'maps', 'scans_new.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     config_path = LaunchConfiguration('config_path')

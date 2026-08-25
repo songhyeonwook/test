@@ -41,19 +41,10 @@ def generate_launch_description():
         parameters=livox_ros2_params
         )
     
-    myahrs_share_dir = get_package_share_directory('myahrs_ros2_driver')
-    
-    myahrs_config_path = os.path.join(myahrs_share_dir, 'config', 'config.yaml')
-        
-    imu_driver = Node(
-        package='myahrs_ros2_driver',
-        executable='myahrs_ros2_driver',
-        name='myahrs_ros2_driver',
-        output='screen',
-        arguments=['/dev/imu', '115200'], # 터미널에서 입력했던 인자값
-        parameters=[myahrs_config_path]        # YAML 설정 파일
-    )
-        
+    # IMU는 별도 장비(myahrs)가 아니라 상단 MID-360 내장 IMU를 쓴다.
+    # multi_topic=1 이므로 드라이버가 라이다마다 /livox/imu_<ip> 로 따로 낸다.
+    #   /livox/imu_192_168_1_154   <- 상단(1번), FAST-LIO 입력
+    #   /livox/imu_192_168_1_143
     tf_livox_to_front = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -68,21 +59,24 @@ def generate_launch_description():
         arguments=['-0.6', '-0.34', '-0.18', '0', '0', '-0.7071068', '0.7071068', 'livox_frame', 'livox_rear']
     )
 
+    # imu_link 는 이제 상단 MID-360 내부 IMU 위치를 가리킨다. 아래 값은
+    # 예전 외장 IMU 시절의 identity 그대로이므로, 상단 라이다 장착 자세가
+    # 확정되면 그에 맞춰 갱신해야 한다. (FAST-LIO 자체는 이 TF가 아니라
+    # config 의 extrinsic_T/extrinsic_R 을 쓰므로 표시용이다.)
     tf_base_to_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='base_link_to_imu',
+        name='body_to_imu',
         arguments=['0', '0', '0', '0', '0', '0', '1', 'body', 'imu_link']
     )
     tf_body_to_livox = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name='base_link_to_imu',
+        name='body_to_livox_frame',
         arguments=['0', '0', '0', '0', '0', '0', '1', 'body', 'livox_frame']
     )
 
     return LaunchDescription([
-        imu_driver,
         livox_driver,
         tf_livox_to_front, 
         tf_livox_to_rear ,
