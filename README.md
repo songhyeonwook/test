@@ -73,6 +73,29 @@ map ─┬─ camera_init ── body ─┬─ imu_link                        
 
 ---
 
+## 환경 준비 (한 번만)
+
+conda 가 시스템 파이썬을 가린다. ROS 작업 전에는 반드시:
+
+```bash
+conda deactivate                              # 또는
+conda config --set auto_activate_base false   # 아예 자동 활성화를 끈다
+```
+
+`catkin_pkg` 가 없다는 빌드 에러가 나면 conda 파이썬을 쓰고 있는 것이다.
+
+측위용 파이썬 의존성 (`global_localization.py`, `transform_fusion.py` 가 쓴다):
+
+```bash
+sudo apt install ros-humble-tf-transformations
+/usr/bin/python3 -m pip install --user open3d "scipy>=1.13" "transforms3d>=0.4.2"
+```
+
+`~/.local` 에 numpy 2.x 가 있으면 apt 의 scipy 1.8 / transforms3d 는 numpy 1.x
+ABI 로 빌드되어 있어 import 가 깨진다. 위처럼 numpy2 호환 버전을 --user 로
+덮어써야 한다. 반드시 `/usr/bin/python3` 로 설치할 것 - conda 쪽에 깔면 ROS 가
+못 찾는다.
+
 ## 빌드
 
 Livox SDK는 colcon이 아니라 시스템에 직접 설치한다 (드라이버가 `/usr/local/lib` 를 하드코딩).
