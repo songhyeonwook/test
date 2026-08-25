@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<!--
+  차량 + 센서 장착 형상.
+
+  여기가 TF 의 유일한 출처다. 예전에는 msg_Multi_launch.py 안에
+  static_transform_publisher 를 늘어놓았는데, 값이 여러 군데로 흩어지고
+  노드 이름이 겹치는 문제가 있었다.
+
+  프레임 트리:
+    body ─┬─ livox_frame ─┬─ livox_top ── imu_link
+          │               ├─ livox_front
+          │               └─ livox_rear
+          └─ (base_link 은 여기 없음. tf_2d.py 가 odom 밑에 만든다)
+
+  body 와 livox_frame 은 같은 지점이다. 드라이버가 포인트클라우드 header 에
+  livox_frame 을 찍기 때문에 이름을 남겨둔다.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="vehicle">
+
+  <!-- ===== 차체 치수 (nav2 footprint 와 같은 실측값) ===== -->
+  <xacro:property name="body_length" value="1.62"/>
+  <xacro:property name="body_width"  value="0.952"/>
+  <xacro:property name="body_height" value="0.60"/>
+
+  <!-- ===== 라이다 장착 ===== -->
+  <!-- front: livox_frame 기준 yaw +90도 -->
+  <xacro:property name="front_xyz" value="0.697 0.35 -0.18"/>
+  <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
+
+  <!-- rear: livox_frame 기준 yaw -90도 -->
+  <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
+  <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
+
+  <!-- top: roll -90도, yaw 180도로 눕혀서 장착.
+       TODO 위치(xyz)가 아직 실측 전이다. 0 0 0 은 임시값이므로
+       FAST-LIO 의 extrinsic 을 확정하기 전에 반드시 채워야 한다. -->
+  <xacro:property name="top_xyz"   value="0 0 0"/>
+  <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
+
+  <!-- MID-360 몸통 원점에서 내부 IMU 까지 (Livox 공장값) -->
+  <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
+
+  <material name="grey"><color rgba="0.4 0.4 0.4 0.6"/></material>
+  <material name="orange"><color rgba="0.9 0.5 0.1 1.0"/></material>
+
+  <!-- MID-360 한 대를 붙이는 매크로 -->
+  <xacro:macro name="mid360" params="name xyz rpy">
+    <link name="${name}">
+      <visual>
+        <geometry><cylinder radius="0.032" length="0.065"/></geometry>
+        <material name="orange"/>
+      </visual>
+    </link>
+    <joint name="livox_frame_to_${name}" type="fixed">
+      <parent link="livox_frame"/>
+      <child  link="${name}"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ===== 차체 ===== -->
+  <link name="body">
+    <visual>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <origin xyz="0 0 ${body_height/2 - 0.18}"/>
+      <material name="grey"/>
+    </visual>
+  </link>
+
+  <link name="livox_frame"/>
+  <joint name="body_to_livox_frame" type="fixed">
+    <parent link="body"/>
+    <child  link="livox_frame"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ===== 라이다 3대 ===== -->
+  <xacro:mid360 name="livox_top"   xyz="${top_xyz}"   rpy="${top_rpy}"/>
+  <xacro:mid360 name="livox_front" xyz="${front_xyz}" rpy="${front_rpy}"/>
+  <xacro:mid360 name="livox_rear"  xyz="${rear_xyz}"  rpy="${rear_rpy}"/>
+
+  <!-- ===== IMU (상단 라이다 내장) ===== -->
+  <link name="imu_link"/>
+  <joint name="livox_top_to_imu" type="fixed">
+    <parent link="livox_top"/>
+    <child  link="imu_link"/>
+    <origin xyz="${imu_xyz}" rpy="0 0 0"/>
+  </joint>
+
+</robot>

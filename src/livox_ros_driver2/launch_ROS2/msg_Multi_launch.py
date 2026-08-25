@@ -46,43 +46,13 @@ def generate_launch_description():
     #   /livox/imu_192_168_1_135   <- 상단(livox_top), FAST-LIO 입력
     #   /livox/imu_192_168_2_102
     #   /livox/imu_192_168_3_144
-    tf_livox_to_front = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='livox_to_livox_front',
-        arguments=['0.697', '0.35', '-0.18', '0', '0', '0.7071068', '0.7071068', 'livox_frame', 'livox_front']
-    )
-
-    tf_livox_to_rear = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='livox_to_livox_rear',
-        arguments=['-0.6', '-0.34', '-0.18', '0', '0', '-0.7071068', '0.7071068', 'livox_frame', 'livox_rear']
-    )
-
-    # imu_link 는 이제 상단 MID-360 내부 IMU 위치를 가리킨다. 아래 값은
-    # 예전 외장 IMU 시절의 identity 그대로이므로, 상단 라이다 장착 자세가
-    # 확정되면 그에 맞춰 갱신해야 한다. (FAST-LIO 자체는 이 TF가 아니라
-    # config 의 extrinsic_T/extrinsic_R 을 쓰므로 표시용이다.)
-    tf_base_to_imu = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='body_to_imu',
-        arguments=['0', '0', '0', '0', '0', '0', '1', 'body', 'imu_link']
-    )
-    tf_body_to_livox = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='body_to_livox_frame',
-        arguments=['0', '0', '0', '0', '0', '0', '1', 'body', 'livox_frame']
-    )
+    # static TF 는 여기 없다. description 패키지의 URDF 를
+    # robot_state_publisher 가 읽어서 내보낸다.
+    #   ros2 launch description description.launch.py
+    # (bringup 의 sensors.launch.py 가 같이 띄운다)
 
     return LaunchDescription([
         livox_driver,
-        tf_livox_to_front, 
-        tf_livox_to_rear ,
-        tf_base_to_imu,
-        tf_body_to_livox
         # launch.actions.RegisterEventHandler(
         #     event_handler=launch.event_handlers.OnProcessExit(
         #         target_action=livox_rviz,

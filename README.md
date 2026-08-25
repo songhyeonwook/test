@@ -9,9 +9,9 @@ Livox MID-360 2대 + IMU로 **FAST-LIO 3D 측위**를 하고, 그 자세를 **�
 ```
 hw/
 ├── src/                        colcon 워크스페이스 (여기 하나뿐)
-│   ├── livox_ros_driver2/      MID-360 x2 드라이버
-│   ├── livox_merge/            2대를 body 기준으로 병합
-│   ├── myahrs_ros2_driver/     IMU (/imu/data)
+│   ├── description/            ★ 차량/센서 형상 URDF. TF의 유일한 출처
+│   ├── livox_ros_driver2/      MID-360 x3 드라이버
+│   ├── livox_merge/            front/rear 2대를 body 기준으로 병합
 │   ├── fast_lio/               매핑 (맵 만들 때만)
 │   ├── fast_lio_localization/  측위 + tf_2d 평면화
 │   ├── pcd2pgm/                3D PCD -> 2D 점유맵
@@ -31,9 +31,9 @@ Nav2 본체는 소스가 아니라 **apt(`/opt/ros/humble`)** 에서 온다. `hw
 ## 데이터 흐름
 
 ```
-MID-360 x2 ─┐
-            ├─ livox_merge ─ /livox_merge/merged_livox (CustomMsg) ─┐
-myahrs IMU ─┴──────────────  /imu/data ───────────────────────────┤
+MID-360 front ─┐
+MID-360 rear  ─┴─ livox_merge ─ /livox_merge/merged_pointcloud ─┐
+MID-360 top ───── /livox/imu_192_168_1_135 ────────────────────┤
                                                                    │
                                                     fast_lio_localization
                                                                    │
@@ -51,11 +51,15 @@ myahrs IMU ─┴──────────────  /imu/data ───
 TF 트리는 `map` 아래에서 두 갈래로 갈라진다.
 
 ```
-map ─┬─ camera_init ── body ─┬─ livox_frame ─┬─ livox_front     (3D, FAST-LIO)
-     │                       │               └─ livox_rear
-     │                       └─ imu_link
-     └─ odom ── base_link                                       (2D, tf_2d.py)
+map ─┬─ camera_init ── body ── livox_frame ─┬─ livox_top ── imu_link   (3D, FAST-LIO)
+     │                                      ├─ livox_front
+     │                                      └─ livox_rear
+     └─ odom ── base_link                                             (2D, tf_2d.py)
 ```
+
+`body` 아래 가지는 전부 `description` 패키지의 URDF 에서 나온다
+(`robot_state_publisher`). 센서 위치를 바꿀 일이 있으면 `urdf/vehicle.urdf.xacro`
+맨 위의 property 만 고치면 된다.
 
 **Nav2는 `base_link` 쪽만 본다.** 이게 핵심이다 — `body` 를 보면 z와 roll/pitch가 그대로
 따라 들어와서 코스트맵이 튄다.

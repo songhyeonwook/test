@@ -1,6 +1,7 @@
 """센서 계층.
 
-  livox_ros_driver2 (MID-360 x3 + 내장 IMU) + 차체 static TF   <- msg_Multi_launch.py
+  description       (URDF -> body 아래 센서 TF)               <- description.launch.py
+  livox_ros_driver2 (MID-360 x3 + 내장 IMU)                    <- msg_Multi_launch.py
   livox_merge       (front/rear 2대를 body 기준 하나로 병합)   <- livox_merge.launch.py
 
 라이다는 3대다. 병합에 들어가는 건 front/rear 둘뿐이고, top 은 IMU 공급원으로만
@@ -26,10 +27,14 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
+    desc_dir = get_package_share_directory('description')
     livox_dir = get_package_share_directory('livox_ros_driver2')
     merge_dir = get_package_share_directory('livox_merge')
 
     return LaunchDescription([
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(desc_dir, 'launch', 'description.launch.py'))),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(livox_dir, 'launch_ROS2', 'msg_Multi_launch.py'))),
