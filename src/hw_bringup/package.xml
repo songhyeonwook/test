@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>hw_bringup</name>
+  <version>1.0.0</version>
+  <description>
+    이 PC 한 대의 전체 구동 설정. 센서 -> FAST-LIO 3D 측위 -> 2D 평면화 -> Nav2
+    파이프라인을 하나의 launch로 묶고, Nav2 파라미터/behavior tree/2D 맵을 보관한다.
+  </description>
+  <maintainer email="hwkorea2011@gmail.com">shw</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 센서 -->
+  <exec_depend>livox_ros_driver2</exec_depend>
+  <exec_depend>livox_merge</exec_depend>
+  <exec_depend>myahrs_ros2_driver</exec_depend>
+
+  <!-- 측위 -->
+  <exec_depend>fast_lio_localization</exec_depend>
+
+  <!-- 내비게이션 (apt: ros-humble-navigation2) -->
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+
+  <!-- 구동 -->
+  <exec_depend>motor_node</exec_depend>
+  <exec_depend>teleop_twist_joy</exec_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
