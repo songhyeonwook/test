@@ -69,6 +69,7 @@ def generate_launch_description():
                  '--topics',
                  '/livox/lidar_192_168_2_102',   # front -> merge
                  '/livox/lidar_192_168_3_144',   # rear  -> merge
-                 '/livox/imu_192_168_1_135'],    # top 내장 IMU -> FAST-LIO
+                 '/livox/imu_192_168_1_135',     # top 내장 IMU -> FAST-LIO
+                 '/odom'],                       # 휠 odom -> nav2 속도 피드백
             output='screen'),
     ])

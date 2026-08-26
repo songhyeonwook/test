@@ -27,9 +27,6 @@ from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
-    # Get the launch directory
-    # nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기서 쓰는 파라미터와
-    # behavior tree 는 이 패키지가 들고 있다.
     nav_dir = get_package_share_directory('navigation')
     default_nav_to_pose_bt_xml = os.path.join(
         nav_dir, 'behavior_trees', 'navigate_to_pose_vehicle.xml')

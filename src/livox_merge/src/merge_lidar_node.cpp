@@ -156,6 +156,8 @@ private:
 
   double slice_z_min_;
   double slice_z_max_;
+  double slice_crop_half_x_;
+  double slice_crop_half_y_;
 
   std::thread sync_thread_;
   bool running_;
@@ -166,6 +168,11 @@ private:
     this->declare_parameter<double>("sync_frequency", 20.0);
     this->declare_parameter<double>("slice_z_min", -2.0);
     this->declare_parameter<double>("slice_z_max", 2.0);
+    // sliced 출력에서 |x|<=half_x 이고 |y|<=half_y 인 점(차체 셀프 반사)을
+    // 버린다. 라이다가 차체 모서리에 있어 몸체를 보기 때문에, 이 크롭이
+    // 없으면 costmap 이 차량 위치를 장애물로 찍는다. 0 이면 비활성.
+    this->declare_parameter<double>("slice_crop_half_x", 0.0);
+    this->declare_parameter<double>("slice_crop_half_y", 0.0);
     this->declare_parameter<std::string>("output.pointcloud2", "/livox_merge/merged_pointcloud");
     this->declare_parameter<std::string>("output.livox_custom", "/livox_merge/merged_livox");
     this->declare_parameter<std::string>("output.pointcloud2_sliced", "/livox_merge/merged_pointcloud_sliced");
@@ -186,6 +193,8 @@ private:
 
     slice_z_min_ = this->get_parameter("slice_z_min").as_double();
     slice_z_max_ = this->get_parameter("slice_z_max").as_double();
+    slice_crop_half_x_ = this->get_parameter("slice_crop_half_x").as_double();
+    slice_crop_half_y_ = this->get_parameter("slice_crop_half_y").as_double();
 
     const auto out_pc = this->get_parameter("output.pointcloud2").as_string();
     const auto out_livox = this->get_parameter("output.livox_custom").as_string();
@@ -419,11 +428,18 @@ private:
 
   void publishSlicedPointCloud2(const CloudOuster &cloud, const rclcpp::Time &stamp, const std::string &frame)
   {
+    const bool crop_enabled = slice_crop_half_x_ > 0.0 && slice_crop_half_y_ > 0.0;
     CloudOuster sliced;
     for (const auto &pt : cloud.points) {
-      if (pt.z >= slice_z_min_ && pt.z <= slice_z_max_) {
-        sliced.push_back(pt);
+      if (pt.z < slice_z_min_ || pt.z > slice_z_max_) {
+        continue;
       }
+      if (crop_enabled &&
+          std::abs(pt.x) <= slice_crop_half_x_ &&
+          std::abs(pt.y) <= slice_crop_half_y_) {
+        continue;
+      }
+      sliced.push_back(pt);
     }
 
     sensor_msgs::msg::PointCloud2 msg;

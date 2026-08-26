@@ -116,7 +116,8 @@ bt_navigator_navigate_to_pose_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: False
-    controller_frequency: 15.0
+    # MPPI 권장 구성: model_dt = 1/controller_frequency. Jetson 부하도 고려.
+    controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.0
     min_theta_velocity_threshold: 0.001
@@ -141,40 +142,106 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.60
       yaw_goal_tolerance: 0.90
-    # Vehicle-style controller: safer than DWB for a large steering-drive platform
+    # MPPI + Ackermann 모델: 후륜 역조향(조향식) 차량에 맞는 최소회전반경
+    # 제약을 지키면서, local costmap 의 동적 장애물을 롤아웃 비용으로 직접
+    # 회피한다. RPP 는 경로 추종만 하고 회피는 못 해서 교체했다.
+    # cmd_vel(v, w) -> 조향각 변환은 차량 하부 제어기가 담당한다.
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.18
-      # Larger fixed lookahead reduces aggressive left-right corrections on a
-      # long vehicle. Goal tolerance is widened slightly so we can still finish
-      # cleanly without needing a tight final circle.
-      lookahead_dist: 1.50
-      min_lookahead_dist: 1.40
-      max_lookahead_dist: 1.70
-      lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.0
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 60
+      model_dt: 0.1          # horizon 6s. 저속(0.2m/s) 플랫폼이라 거리로는 ~1.2m
+      batch_size: 1200       # Jetson 급에서 10Hz 를 지키도록 보수적으로 시작
+      iteration_count: 1
+      vx_std: 0.08
+      vy_std: 0.0
+      wz_std: 0.2
+      vx_max: 0.20
+      vx_min: 0.0            # 전진 전용. 플래너(DUBIN)와 일치
+      vy_max: 0.0
+      wz_max: 0.30           # motor_node max_angular_speed(0.3) 와 일치. 넘기면 거기서 잘린다
+      ax_max: 0.3
+      ax_min: -0.3
+      ay_max: 0.0
+      az_max: 0.5
+      motion_model: "Ackermann"
+      AckermannConstraints:
+        # TODO: 실측 최소회전반경으로 교체 (플래너 minimum_turning_radius 와
+        # 반드시 같은 값 유지)
+        min_turning_r: 1.30
+      prune_distance: 2.0
       transform_tolerance: 0.3
-      use_velocity_scaled_lookahead_dist: false
-      min_approach_linear_velocity: 0.07
-      approach_velocity_scaling_dist: 1.0
-      use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.25
-      use_regulated_linear_velocity_scaling: true
-      use_cost_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_radius: 1.30
-      regulated_linear_scaling_min_speed: 0.05
-      use_rotate_to_heading: false
-      allow_reversing: false
-      rotate_to_heading_min_angle: 0.0
-      max_angular_accel: 0.5
-      stateful: true
+      temperature: 0.3
+      gamma: 0.015
+      visualize: false
+      regenerate_noises: false
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic",
+                "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic",
+                "PathAngleCritic", "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      # 장애물 비용. 직사각형 차체(1.62x0.95)라 원 근사 대신 footprint 검사.
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: true
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+      # SmacHybrid 가 주행 가능한 방향까지 주는 경로라 orientation 사용
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: true
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 0
 
 local_costmap:
   local_costmap:
     ros__parameters:
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: map
+      # REP-105: local costmap 은 연속 프레임인 odom 에 둔다. map 에 두면
+      # global_localization 의 ICP 보정(map->odom 점프)이 회피 중인 장애물
+      # 위치까지 같이 옮겨 버린다. static_layer 는 TF 로 map->odom 을 따라온다.
+      global_frame: odom
       robot_base_frame: base_link
       use_sim_time: False
       rolling_window: true
@@ -187,14 +254,37 @@ local_costmap:
       # Vehicle footprint based on measured size:
       # length 1.62 m, max width 0.952 m, with small safety margin.
       footprint: "[[0.81, 0.48], [0.81, -0.48], [-0.81, -0.48], [-0.81, 0.48]]"
-      # Keep the local costmap on the static 2D map first.
-      # The live scan converted from Livox clouds is currently not a rigid 2D
-      # sensor in the Nav2 TF tree, so it makes the local costmap jump.
-      plugins: ["static_layer", "inflation_layer"]
+      # obstacle_layer: 동적 장애물. 입력은 livox_merge 의 sliced 클라우드
+      # (base_footprint 프레임, z 슬라이스 + 차체 크롭 적용됨). TF 정리 후
+      # base_footprint 가 rigid 프레임이 되어 이제 안전하게 넣을 수 있다.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        footprint_clearing_enabled: True
+        observation_sources: merged_cloud
+        merged_cloud:
+          topic: /livox_merge/merged_pointcloud_sliced
+          data_type: "PointCloud2"
+          marking: True
+          clearing: True
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.0
+          # 주의: 이 두 값은 costmap 의 global_frame(odom) 기준이고,
+          # livox_merge 의 slice_z_min/max 는 base_footprint(지면) 기준이다.
+          # odom 의 z=0 은 base_link 라 지면보다 0.5m 위 -> 두 값을 같은 숫자로
+          # 맞추면 안 된다. 실제 z 필터는 slice_z 가 담당하고 여기는 여유폭이다.
+          # (slice 0.15~2.3 지면기준 == -0.35~1.8 odom기준, 아래 범위 안에 든다)
+          min_obstacle_height: -0.5
+          max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 1.5
-        inflation_radius: 0.05
+        # MPPI 가 장애물을 미리 피해가려면 비용 기울기가 필요해서 0.05 에서
+        # 올렸다. costmap 권고상 footprint 내접반경(0.49)보다는 커야 한다.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -214,10 +304,28 @@ global_costmap:
       footprint: "[[0.77, 0.44], [0.77, -0.44], [-0.77, -0.44], [-0.77, 0.44]]"
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "inflation_layer"]
+      # obstacle_layer 를 글로벌에도 넣어, 지도에 없는 장애물이 오래 머물면
+      # 주기 재계획(BT 0.2Hz)이 아예 돌아가는 경로를 뽑도록 한다.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        footprint_clearing_enabled: True
+        observation_sources: merged_cloud
+        merged_cloud:
+          topic: /livox_merge/merged_pointcloud_sliced
+          data_type: "PointCloud2"
+          marking: True
+          clearing: True
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
+          raytrace_max_range: 8.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -0.5
+          max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 1.5
@@ -257,7 +365,7 @@ planner_server:
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
       # TODO: Replace with measured minimum turning radius before field test.
-      minimum_turning_radius: 1.30
+      minimum_turning_radius: 1.0 #1.30
       reverse_penalty: 100.0
       change_penalty: 0.0
       non_straight_penalty: 1.05
@@ -290,7 +398,7 @@ behavior_server:
     transform_tolerance: 0.1
     use_sim_time: False
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.35
+    max_rotational_vel: 0.30
     min_rotational_vel: 0.0
     rotational_acc_lim: 0.5
 
@@ -315,8 +423,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.20, 0.0, 0.35]
-    min_velocity: [0.0, 0.0, -0.35]
+    # motor_node 한계(max_linear 0.2, max_angular 0.3)와 동일하게 둔다
+    max_velocity: [0.20, 0.0, 0.30]
+    min_velocity: [0.0, 0.0, -0.30]
     max_accel: [0.3, 0.0, 0.5]
     max_decel: [-0.3, 0.0, -0.5]
     odom_topic: "odom"
