@@ -1,18 +1,3 @@
-"""URDF 를 읽어 TF 를 내보낸다.
-
-  vehicle   base_link -> base_footprint -> 센서들   (사용자가 보는 모델)
-
-map->odom, odom->base_link 은 fast_lio_localization 의 tf_2d.py 가 FAST-LIO
-오도메트리 토픽을 평면화해서 낸다. 전체는 단일 체인이다.
-
-  map ── odom ── base_link ── base_footprint ── livox_*
-
-FAST-LIO 내부 프레임(camera_init, body)은 TF 에 올리지 않는다. body -> 차량
-기준점 extrinsic 은 fast_lio_localization/config/mid360.yaml 의 ref_from_body_*
-가 든다.
-
-관절이 전부 fixed 라 joint_state_publisher 는 필요 없다.
-"""
 import os
 
 from ament_index_python.packages import get_package_share_directory

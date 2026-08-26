@@ -6,14 +6,17 @@
     input_type: "pointcloud2"
 
     sync_frequency: 20.0
-    slice_z_min: -2.0
-    slice_z_max: 2.0
+    # 실장비 설정과 동일한 costmap 용 슬라이스/차체 크롭
+    slice_z_min: 0.15
+    slice_z_max: 2.3
+    slice_crop_half_x: 0.90
+    slice_crop_half_y: 0.55
 
     lidars.topics:
       - "/livox/lidar_192_168_2_102"   # lidar_0 = livox_front
       - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
 
-    lidars.extrinsics.lidar_0:   # base_footprint <- livox_front
+    lidars.extrinsics.lidar_0:   # base_footprint(지면) <- livox_front
       - 0.000000
       - -1.000000
       - 0.000000
@@ -25,13 +28,13 @@
       - 0.000000
       - 0.000000
       - 1.000000
-      - -0.180000
+      - 0.320000
       - 0.000000
       - 0.000000
       - 0.000000
       - 1.000000
 
-    lidars.extrinsics.lidar_1:   # base_footprint <- livox_rear
+    lidars.extrinsics.lidar_1:   # base_footprint(지면) <- livox_rear
       - 0.000000
       - 1.000000
       - 0.000000
@@ -43,7 +46,7 @@
       - 0.000000
       - 0.000000
       - 1.000000
-      - -0.180000
+      - 0.320000
       - 0.000000
       - 0.000000
       - 0.000000

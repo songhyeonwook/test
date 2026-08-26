@@ -12,7 +12,9 @@
         scan_voxel_size: 0.1
         freq_localization: 0.5
         localization_th: 0.80
-        continuous_global_localization: false
+        # 주기 ICP 보정. 꺼두면 초기 정합 이후 FAST-LIO 드리프트가 영원히
+        # 안 잡힌다. 실패 시(임계 미만) 이전 추정을 유지하므로 켜도 안전하다.
+        continuous_global_localization: true
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
         # 3D prior map. navigation/map 에 2D 점유맵과 함께 보관한다.
@@ -47,15 +49,19 @@
             # 입력 클라우드는 livox_merge 가 base_footprint 로 보낸 것이고,
             # IMU 는 livox_top 안에 있다. 그래서 이 값은 한 대짜리 MID-360 의
             # 공장 오프셋이 아니라 base_footprint -> IMU 전체 변환이다.
-            #   inverse( T(base_footprint<-livox_top) * T(livox_top<-IMU) )
-            # 값이 바뀌면 아래 ref_from_body_* 도 같이 바꿔야 한다.
-            extrinsic_T: [ 0.0, 0.82321, -0.23088 ]
+            #   inverse( T(base_footprint<-livox_frame) * T(livox_frame<-livox_top)
+            #            * T(livox_top<-IMU) )
+            # base_footprint 는 지면에 있다. 아래 ref_from_body_* 는 base_link
+            # (지면보다 0.5m 위) 기준이라 y 성분이 0.5 만큼 다르다 - 같은 값이
+            # 아니므로 한쪽만 보고 복사하지 말 것.
+            extrinsic_T: [ 0.0, 1.32321, -0.23088 ]
             extrinsic_R: [ -1., 0., 0.,
                             0., 0., -1.,
                             0., -1., 0.]
 
-        # tf_2d_bridge: body(IMU) 에서 본 차량 정렬 기준점.
-        # 위 extrinsic_T/R 와 같은 기하 (base_footprint -> IMU 의 역변환).
+        # tf_2d_bridge: body(IMU) 에서 본 base_link (tf_2d 가 실제로 발행하는
+        # 프레임). 회전은 위 extrinsic_R 과 같고 평행이동만 다르다.
+        #   inverse( T(base_link<-...<-IMU) )
         # 한쪽을 바꾸면 반드시 tools/check_frames.py 로 정합을 확인할 것.
         ref_from_body_xyz: [ 0.0, 0.82321, -0.23088 ]
         ref_from_body_rpy: [ -1.5707963267948966, 0.0, -3.141592653589793 ]  # -pi/2 0 -pi

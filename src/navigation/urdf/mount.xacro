@@ -6,27 +6,37 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- 차체 치수 (nav2 footprint 와 같은 실측값) -->
+  <!-- 차체 치수 (nav2 footprint 와 같은 실측값).
+       body_height 는 지면에서 차체 윗면까지다. base_footprint 가 지면에 있으므로
+       차체 상자는 base_footprint 위로 그대로 쌓인다. -->
   <xacro:property name="body_length" value="1.62"/>
   <xacro:property name="body_width"  value="0.952"/>
   <xacro:property name="body_height" value="0.60"/>
 
-  <!-- 라이다 장착 (base_footprint 기준). front/rear 는 원점대칭이다. -->
-  <xacro:property name="front_xyz" value="0.697 0.35 -0.18"/>
+  <!-- base_link(tf_2d 가 z=0 으로 눌러 내는 평면 프레임) 아래 지면까지의 거리.
+       bag 의 prior map 바닥면에서 실측. base_footprint 가 여기에 놓인다. -->
+  <xacro:property name="ground_drop" value="0.50"/>
+
+  <!-- 라이다 중심 프레임 (base_footprint=지면 기준).
+       front/rear 의 중점이고, z 0.32 는 지면 위 라이다 평면 높이다. -->
+  <xacro:property name="livox_frame_xyz" value="0.0485 0.005 0.32"/>
+
+  <!-- 라이다 장착 (livox_frame 기준). front/rear 는 정의상 정확히 원점대칭이다. -->
+  <xacro:property name="front_xyz" value="0.6485 0.345 0"/>
   <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
 
-  <xacro:property name="rear_xyz"  value="-0.6 -0.34 -0.18"/>
+  <xacro:property name="rear_xyz"  value="-0.6485 -0.345 0"/>
   <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
 
-  <!-- top 은 옆으로 눕혀 장착. x, y 는 내부 IMU 가 base_footprint 와 중심좌표를
-       공유하도록 역산한 값이고, z 만 추정치다(오차 +-0.025). -->
-  <xacro:property name="top_xyz"   value="0.011 -0.275 0.8465"/>
+  <!-- top 은 옆으로 눕혀 장착. x 는 내부 IMU 가 base_link 의 x=0 에 오도록
+       역산한 값이고, z 만 추정치다(오차 +-0.025). -->
+  <xacro:property name="top_xyz"   value="-0.0375 -0.28 1.0265"/>
   <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
 
   <!-- MID-360 몸통 원점 -> 내부 IMU (Livox 공장값) -->
   <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
 
-  <!-- FAST-LIO 의 body(=IMU) 에서 본 차량 기준점은 여기 없다.
+  <!-- FAST-LIO 의 body(=IMU) 에서 본 base_link 는 여기 없다.
        fast_lio_localization/config/mid360.yaml 의 ref_from_body_* 를 볼 것.
        (tf_2d.py 가 파라미터로 받는다) -->
 

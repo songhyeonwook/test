@@ -2,16 +2,23 @@
 <!--
   차량과 센서 형상. 내비게이션이 쓰는 2D 체인 아래에 붙는다.
 
-    map ── odom ── base_link ── base_footprint ─┬─ livox_frame
-                                                ├─ livox_top ── imu_link
-                                                ├─ livox_front
-                                                └─ livox_rear
+    map ── odom ── base_link ── base_footprint ── livox_frame ─┬─ livox_top ── imu_link
+                                (지면)            (라이다 중심) ├─ livox_front
+                                                               └─ livox_rear
 
   map->odom, odom->base_link 은 tf_2d.py 가 낸다. base_link 는 이 URDF 의
   루트이므로 여기서는 발행하지 않는다(부모가 둘이 되면 TF 가 깨진다).
 
+  base_link 는 tf_2d.py 의 planarize() 가 z 를 0 으로 눌러 만드는 평면 프레임이라
+  지면이 아니다. 지면은 그보다 ground_drop(0.5m) 아래이고, base_footprint 가
+  REP-120 대로 거기에 놓인다. 따라서 base_footprint 기준 z 는 곧 지면 위 높이다.
+
+  livox_frame 은 세 라이다를 묶는 중심 프레임으로, front/rear 의 중점이다.
+  (드라이버가 클라우드에 찍는 frame_id 는 livox_top/front/rear 이고
+   livox_frame 은 쓰지 않는다 - multi_MID360_config.json 참조)
+
   FAST-LIO 의 camera_init / body 는 측위 엔진 내부 프레임이라 TF 에 올리지
-  않는다(debug_tf 로만 켠다). body -> 차량 기준점 extrinsic 은
+  않는다(debug_tf 로만 켠다). body -> base_link extrinsic 은
   fast_lio_localization/config/mid360.yaml 의 ref_from_body_* 가 든다.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="vehicle">
@@ -27,18 +34,17 @@
         <material name="orange"/>
       </visual>
     </link>
-    <joint name="base_footprint_to_${name}" type="fixed">
-      <parent link="base_footprint"/>
+    <joint name="livox_frame_to_${name}" type="fixed">
+      <parent link="livox_frame"/>
       <child  link="${name}"/>
       <origin xyz="${xyz}" rpy="${rpy}"/>
     </joint>
   </xacro:macro>
 
-  <!-- tf_2d.py 가 내보내는 평면화된 차량 프레임 -->
+  <!-- tf_2d.py 가 내보내는 평면화된 차량 프레임 (z 는 지면이 아니다) -->
   <link name="base_link"/>
 
-  <!-- 차량 기준점. tf_2d 가 이미 z 를 0 으로 눌러 놓으므로 base_link 와 같은
-       지점이다. 모델과 센서를 매다는 자리. -->
+  <!-- 지면 투영점. 차체와 센서를 매다는 자리이고, 여기 기준 z = 지면 위 높이. -->
   <link name="base_footprint">
     <visual>
       <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
@@ -48,15 +54,14 @@
   </link>
   <joint name="base_link_to_base_footprint" type="fixed">
     <parent link="base_link"/><child link="base_footprint"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="0 0 ${-ground_drop}" rpy="0 0 0"/>
   </joint>
 
-  <!-- 드라이버가 원시 클라우드 header 에 찍는 이름. 병합 전이라 기하학적
-       의미는 없고, RViz 가 프레임을 못 찾는 것만 막아준다. -->
+  <!-- 세 라이다를 묶는 중심 프레임. front/rear 의 중점이다. -->
   <link name="livox_frame"/>
   <joint name="base_footprint_to_livox_frame" type="fixed">
     <parent link="base_footprint"/><child link="livox_frame"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="${livox_frame_xyz}" rpy="0 0 0"/>
   </joint>
 
   <xacro:mid360 name="livox_top"   xyz="${top_xyz}"   rpy="${top_rpy}"/>

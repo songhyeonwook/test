@@ -4,9 +4,14 @@
 같은 기하 정보가 세 군데에 있다:
   src/navigation/urdf/mount.xacro            TF 값의 원본 (vehicle urdf 가 include)
   src/livox_merge/config/livox_merge_config.yaml   포인트 병합
-  src/fast_lio_localization/config/mid360.yaml  lidar->IMU extrinsic,
-                                               tf_2d 의 ref_from_body_*
-                                              + tf_2d 의 ref_from_body (역변환)
+  src/bringup/params/livox_merge_bag.yaml          같은 값의 bag 재생용 사본
+  src/fast_lio_localization/config/mid360.yaml  병합클라우드->IMU extrinsic,
+                                               + tf_2d 의 ref_from_body_*
+
+주의: base_footprint 는 지면, base_link 는 그보다 ground_drop(0.5m) 위다.
+  - livox_merge extrinsic / FAST-LIO extrinsic_T  -> base_footprint 기준
+  - tf_2d 의 ref_from_body_*                      -> base_link 기준
+둘은 더 이상 같은 값이 아니다.
 
 한 곳만 고치고 나머지를 안 고치면 조용히 어긋난다. 값을 만질 때마다 돌릴 것.
 
@@ -23,6 +28,11 @@ import yaml
 # MID-360 몸통 원점 -> 내부 IMU (Livox 공장값)
 IMU_IN_LIDAR = np.array([0.011, 0.02329, -0.04412])
 
+MERGE_CFGS = [
+    'src/livox_merge/config/livox_merge_config.yaml',
+    'src/bringup/params/livox_merge_bag.yaml',
+]
+
 
 def rot(rpy):
     r, p, y = rpy
@@ -32,21 +42,46 @@ def rot(rpy):
     return Rz(y) @ Ry(p) @ Rx(r)
 
 
+def xlate(t):
+    M = np.eye(4)
+    M[:3, 3] = t
+    return M
+
+
 def urdf_joints(path):
+    """(parent, child) -> 4x4, 그리고 child -> parent 맵."""
     xml = subprocess.run(['xacro', path], capture_output=True, text=True, check=True).stdout
-    out = {}
+    out, parent_of = {}, {}
     for j in ET.fromstring(xml).iter('joint'):
         o = j.find('origin')
         M = np.eye(4)
         M[:3, :3] = rot([float(v) for v in o.get('rpy').split()])
         M[:3, 3] = [float(v) for v in o.get('xyz').split()]
-        out[(j.find('parent').get('link'), j.find('child').get('link'))] = M
-    return out
+        p, c = j.find('parent').get('link'), j.find('child').get('link')
+        out[(p, c)] = M
+        parent_of[c] = p
+    return out, parent_of
+
+
+def make_pose(J, parent_of):
+    """base_link 등 임의 조상 기준의 프레임 pose 를 체인으로 합성한다."""
+    def pose(frame, root):
+        M = np.eye(4)
+        cur = frame
+        while cur != root:
+            if cur not in parent_of:
+                raise KeyError(f'{frame} 에서 {root} 로 가는 체인이 끊겼다 ({cur})')
+            p = parent_of[cur]
+            M = J[(p, cur)] @ M
+            cur = p
+        return M
+    return pose
 
 
 def main():
     ok = True
-    J = urdf_joints('src/navigation/urdf/vehicle.urdf.xacro')
+    J, parent_of = urdf_joints('src/navigation/urdf/vehicle.urdf.xacro')
+    pose = make_pose(J, parent_of)
 
     def check(label, a, b, tol=1e-4):
         nonlocal ok
@@ -57,43 +92,71 @@ def main():
             print(f"        설정: {np.round(np.asarray(a), 5).tolist()}")
             print(f"        URDF: {np.round(np.asarray(b), 5).tolist()}")
 
-    print("livox_merge extrinsics vs URDF")
-    cfg = yaml.safe_load(open('src/livox_merge/config/livox_merge_config.yaml'))
-    cfg = cfg['merge_lidar_node']['ros__parameters']
-    for key, link in [('lidar_0', 'livox_front'), ('lidar_1', 'livox_rear')]:
-        M = np.array(cfg[f'lidars.extrinsics.{key}']).reshape(4, 4)
-        check(f"{key} <-> base_footprint<-{link}", M, J[('base_footprint', link)])
+    # ---- 트리 구조 자체의 약속 ----
+    print("TF 트리 구조")
+    bf_from_bl = pose('base_footprint', 'base_link')
+    drop = -bf_from_bl[2, 3]
+    flat = np.allclose(bf_from_bl[:3, :3], np.eye(3), atol=1e-9) and \
+        np.allclose(bf_from_bl[:2, 3], 0, atol=1e-9)
+    ok &= flat
+    print(f"  [{'OK' if flat else '불일치'}] base_footprint 는 base_link 바로 아래"
+          f" (지면까지 {drop:.3f} m, 회전/xy 오프셋 없음)")
 
-    # 병합 클라우드가 실제로 놓이는 프레임과 라벨이 같아야 한다
-    frame = cfg['output.frame_id']
-    print(f"  [{'OK' if frame == 'base_footprint' else '불일치'}] output.frame_id = {frame}")
-    ok &= frame == 'base_footprint'
+    # livox_frame 은 front/rear 의 중점이어야 한다
+    f_bf = pose('livox_front', 'base_footprint')[:3, 3]
+    r_bf = pose('livox_rear', 'base_footprint')[:3, 3]
+    lf_bf = pose('livox_frame', 'base_footprint')[:3, 3]
+    check("livox_frame == livox_front/livox_rear 의 중점", lf_bf, (f_bf + r_bf) / 2)
 
-    imu_bf = np.linalg.inv(
-        J[('base_footprint', 'livox_top')]
-        @ np.block([[np.eye(3), IMU_IN_LIDAR.reshape(3, 1)], [np.zeros((1, 3)), 1.0]]))
+    # 세 라이다가 모두 livox_frame 에 매달려 있어야 한다
+    for lid in ['livox_top', 'livox_front', 'livox_rear']:
+        good = parent_of.get(lid) == 'livox_frame'
+        ok &= good
+        print(f"  [{'OK' if good else '불일치'}] {lid} 의 부모 = "
+              f"{parent_of.get(lid)} (livox_frame 이어야 함)")
 
-    print("\nFAST-LIO extrinsic vs URDF (base_footprint -> IMU)")
-    for f in ['src/fast_lio_localization/config/mid360.yaml']:
-        txt = open(f).read()
-        T = [float(v) for v in re.search(r'extrinsic_T:\s*\[([^\]]+)\]', txt).group(1).split(',')]
-        R = re.search(r'extrinsic_R:\s*\[([^\]]+)\]', txt, re.S).group(1)
-        R = np.array([float(v) for v in R.replace('\n', ' ').split(',')]).reshape(3, 3)
-        check(f"{f} extrinsic_T", T, imu_bf[:3, 3])
-        check(f"{f} extrinsic_R", R, imu_bf[:3, :3])
+    # ---- livox_merge ----
+    print("\nlivox_merge extrinsics vs URDF (base_footprint 기준)")
+    for path in MERGE_CFGS:
+        cfg = yaml.safe_load(open(path))
+        cfg = cfg.get('merge_lidar_node', cfg.get('/**'))['ros__parameters']
+        print(f"  {path}")
+        for key, link in [('lidar_0', 'livox_front'), ('lidar_1', 'livox_rear')]:
+            M = np.array(cfg[f'lidars.extrinsics.{key}']).reshape(4, 4)
+            check(f"  {key} <-> base_footprint<-{link}", M,
+                  pose(link, 'base_footprint'))
+        frame = cfg.get('output.frame_id')
+        if frame is not None:
+            good = frame == 'base_footprint'
+            ok &= good
+            print(f"    [{'OK' if good else '불일치'}] output.frame_id = {frame}")
 
-    print("\ntf_2d ref_from_body (body -> 차량 기준점) vs URDF")
-    loc = yaml.safe_load(
-        open('src/fast_lio_localization/config/mid360.yaml'))
-    loc = loc['/**']['ros__parameters']
+    # ---- FAST-LIO: 병합클라우드(base_footprint) 를 IMU 에서 본 값 ----
+    imu_bf = np.linalg.inv(pose('imu_link', 'base_footprint'))
+    print("\nFAST-LIO extrinsic vs URDF (base_footprint <- IMU 의 역변환)")
+    f = 'src/fast_lio_localization/config/mid360.yaml'
+    txt = open(f).read()
+    T = [float(v) for v in re.search(r'extrinsic_T:\s*\[([^\]]+)\]', txt).group(1).split(',')]
+    R = re.search(r'extrinsic_R:\s*\[([^\]]+)\]', txt, re.S).group(1)
+    R = np.array([float(v) for v in R.replace('\n', ' ').split(',')]).reshape(3, 3)
+    check(f"{f} extrinsic_T", T, imu_bf[:3, 3])
+    check(f"{f} extrinsic_R", R, imu_bf[:3, :3])
+
+    # ---- tf_2d: base_link 기준 (지면이 아니다) ----
+    imu_bl = np.linalg.inv(pose('imu_link', 'base_link'))
+    print("\ntf_2d ref_from_body (body -> base_link) vs URDF")
+    loc = yaml.safe_load(open(f))['/**']['ros__parameters']
     M = np.eye(4)
     M[:3, :3] = rot(loc['ref_from_body_rpy'])
     M[:3, 3] = loc['ref_from_body_xyz']
-    check("mid360.yaml ref_from_body", M, imu_bf)
+    check("mid360.yaml ref_from_body", M, imu_bl)
 
-    f = J[('base_footprint', 'livox_front')][:3, 3]
-    r = J[('base_footprint', 'livox_rear')][:3, 3]
-    print(f"\n참고: front+rear xy = {np.round((f + r)[:2], 4).tolist()}  (0에 가까울수록 원점대칭)")
+    print(f"\n참고: front+rear xy(livox_frame 기준) = "
+          f"{np.round((pose('livox_front', 'livox_frame')[:3, 3] + pose('livox_rear', 'livox_frame')[:3, 3])[:2], 4).tolist()}"
+          f"  (0 이면 원점대칭)")
+    print("참고: 지면 위 라이다 높이 = " + ", ".join(
+        f"{n} {pose(n, 'base_footprint')[2, 3]:.4f} m"
+        for n in ['livox_front', 'livox_rear', 'livox_top']))
 
     print("\n=> " + ("전부 일치" if ok else "불일치 있음"))
     return 0 if ok else 1
