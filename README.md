@@ -93,6 +93,13 @@ conda config --set auto_activate_base false   # 아예 자동 활성화를 끈�
 `catkin_pkg` 가 없다는 빌드 에러, `rclpy._rclpy_pybind11` 를 못 찾는다는 에러가
 나면 conda 파이썬을 쓰고 있는 것이다.
 
+URDF/TF 의존성 (`description.launch.py` 가 `xacro` 명령을 실행한다. 없으면
+"xacro 파일이 없다/실행 실패" 로 보인다):
+
+```bash
+sudo apt install ros-humble-xacro ros-humble-robot-state-publisher ros-humble-joint-state-publisher
+```
+
 측위용 파이썬 의존성 (`global_localization.py`, `transform_fusion.py` 가 쓴다):
 
 ```bash
