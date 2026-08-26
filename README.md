@@ -120,7 +120,7 @@ MID-360 3대는 유선 `enp130s0` 하나에 스위치로 묶여 있고, 드라�
 
 | 라이다 | lidar_ip | host_ip |
 |---|---|---|
-| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.2 |
+| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.50 |
 | livox_front | 192.168.2.102 | 192.168.2.50 |
 | livox_rear | 192.168.3.144 | 192.168.3.50 |
 
@@ -129,7 +129,7 @@ MID-360 3대는 유선 `enp130s0` 하나에 스위치로 묶여 있고, 드라�
 ```bash
 sudo nmcli con mod "Wired connection 1" \
   ipv4.method manual \
-  ipv4.addresses "192.168.1.2/24,192.168.2.50/24,192.168.3.50/24" \
+  ipv4.addresses "192.168.1.50/24,192.168.2.50/24,192.168.3.50/24" \
   ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
 sudo nmcli con up "Wired connection 1"
 ip -4 -br addr show enp130s0          # 주소 3개 확인
@@ -137,6 +137,12 @@ for ip in 192.168.1.135 192.168.2.102 192.168.3.144; do ping -c1 -W1 $ip; done
 ```
 
 `ipv4.never-default yes` 는 유선이 기본 게이트웨이를 가져가 Wi-Fi 인터넷을 끊는 것을 막는다.
+호스트 IP 는 rbio TransferRobot 의 Jetson 과 동일하게 맞춘 값이다 (앱 내장 설정과 호환).
+
+**SDK multi-NIC 패치가 필수다.** 순정 Livox-SDK2 는 detection 소켓을 첫 번째 라이다의
+host_ip 하나에만 열어서, 서브넷이 3개면 라이다 1대만 붙는다. `third_party/Livox-SDK2` 에는
+rbio 의 `patches/livox-sdk2-multi-nic-detection.patch` 가 적용돼 있다 (host_ip 마다 detection
+소켓을 연다). SDK 를 새로 받아오면 `git apply patches/livox-sdk2-multi-nic-detection.patch` 후 빌드.
 
 ## 빌드
 

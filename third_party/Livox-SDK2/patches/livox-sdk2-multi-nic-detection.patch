@@ -1,0 +1,176 @@
+diff --git a/sdk_core/device_manager.cpp b/sdk_core/device_manager.cpp
+--- a/sdk_core/device_manager.cpp
++++ b/sdk_core/device_manager.cpp
+@@ -29,6 +29,7 @@
+ #endif
+ #include "device_manager.h"
+ 
++#include <algorithm>
+ #include <iostream>
+ 
+ #include "comm/define.h"
+@@ -69,6 +70,7 @@ DeviceManager& DeviceManager::GetInstance() {
+ bool DeviceManager::Init(const std::string& host_ip, const LivoxLidarLoggerCfgInfo* log_cfg_info) {
+   is_view_ = true;
+   detection_host_ip_ = host_ip;
++  detection_host_ips_ = {host_ip};
+   comm_port_.reset(new CommPort());
+ 
+   std::shared_ptr<LivoxLidarLoggerCfg> lidar_logger_cfg_ptr(new LivoxLidarLoggerCfg());
+@@ -123,14 +125,29 @@ bool DeviceManager::Init(std::shared_ptr<std::vector<LivoxLidarCfg>>& lidars_cfg
+   lidar_logger_cfg_ptr_ = lidar_logger_cfg_ptr;
+   sdk_framework_cfg_ptr_ = sdk_framework_cfg_ptr;
+ 
+-  if (lidars_cfg_ptr_ && !(lidars_cfg_ptr_->empty())) {
+-    detection_host_ip_ = lidars_cfg_ptr_->at(0).host_net_info.host_ip;
+-  } else if (custom_lidars_cfg_ptr && !(custom_lidars_cfg_ptr->empty())) {
+-    detection_host_ip_ = custom_lidars_cfg_ptr->at(0).host_net_info.host_ip;
+-  } else {
++  detection_host_ips_.clear();
++  const auto add_detection_host = [this](const std::string& host_ip) {
++    if (!host_ip.empty()
++        && std::find(detection_host_ips_.begin(), detection_host_ips_.end(), host_ip)
++            == detection_host_ips_.end()) {
++      detection_host_ips_.push_back(host_ip);
++    }
++  };
++  if (lidars_cfg_ptr_) {
++    for (const auto& lidar_cfg : *lidars_cfg_ptr_) {
++      add_detection_host(lidar_cfg.host_net_info.host_ip);
++    }
++  }
++  if (custom_lidars_cfg_ptr_) {
++    for (const auto& lidar_cfg : *custom_lidars_cfg_ptr_) {
++      add_detection_host(lidar_cfg.host_net_info.host_ip);
++    }
++  }
++  if (detection_host_ips_.empty()) {
+     LOG_ERROR("Device manager init failed, can not find cmd host ip.");
+     return false;
+   }
++  detection_host_ip_ = detection_host_ips_.front();
+   comm_port_.reset(new CommPort());
+   
+   if (!lidar_logger_cfg_ptr) {
+@@ -269,18 +286,23 @@ bool DeviceManager::CreateDetectionChannel() {
+   detection_io_thread_->GetLoop().lock()->AddDelegate(detection_broadcast_socket_, this, nullptr);
+ #endif
+ 
+-  std::string key = detection_host_ip_ + ":" + std::to_string(kDetectionPort);
+-  detection_socket_ = util::CreateSocket(kDetectionPort, true, true, true, detection_host_ip_, "");
+-  if (detection_socket_ < 0) {
+-    LOG_ERROR("Create detection socket failed.");
+-    return false;
+-  }
+-  detection_io_thread_->GetLoop().lock()->AddDelegate(detection_socket_, this, nullptr);
+-
+-  channel_info_[key] = detection_socket_;
+-  if (custom_command_channel_.find(key) == custom_command_channel_.end()) {
+-    custom_command_channel_[key] = detection_socket_;
++  detection_sockets_.clear();
++  for (const auto& host_ip : detection_host_ips_) {
++    std::string key = host_ip + ":" + std::to_string(kDetectionPort);
++    socket_t detection_socket =
++        util::CreateSocket(kDetectionPort, true, true, true, host_ip, "");
++    if (detection_socket < 0) {
++      LOG_ERROR("Create detection socket failed for host ip:{}.", host_ip.c_str());
++      return false;
++    }
++    detection_io_thread_->GetLoop().lock()->AddDelegate(detection_socket, this, nullptr);
++    detection_sockets_.push_back(detection_socket);
++    channel_info_[key] = detection_socket;
++    if (custom_command_channel_.find(key) == custom_command_channel_.end()) {
++      custom_command_channel_[key] = detection_socket;
++    }
+   }
++  detection_socket_ = detection_sockets_.front();
+ 
+   return true;
+ }
+@@ -441,10 +463,12 @@ void DeviceManager::Detection() {
+   servaddr.sin_addr.s_addr = inet_addr("255.255.255.255");
+   servaddr.sin_port = htons(kDetectionPort);
+ 
+-  int byte_send = sendto(detection_socket_, (const char*)buf.data(), size, 0,
+-      (const struct sockaddr *) &servaddr, sizeof(servaddr));
+-  if (byte_send < 0) {
+-    LOG_INFO("Detection lidars failed, Send to lidar failed.");
++  for (const socket_t detection_socket : detection_sockets_) {
++    int byte_send = sendto(detection_socket, (const char*)buf.data(), size, 0,
++        (const struct sockaddr *) &servaddr, sizeof(servaddr));
++    if (byte_send < 0) {
++      LOG_INFO("Detection lidars failed, Send to lidar failed.");
++    }
+   }
+ }
+ 
+@@ -469,7 +493,8 @@ void DeviceManager::OnData(socket_t sock, void *client_data) {
+   tmp_addr.s_addr = handle;
+   std::string lidar_ip = inet_ntoa(tmp_addr);
+ 
+-  if (lidar_ip == detection_host_ip_) {
++  if (std::find(detection_host_ips_.begin(), detection_host_ips_.end(), lidar_ip)
++      != detection_host_ips_.end()) {
+     return;
+   }
+ 
+@@ -813,8 +838,10 @@ bool DeviceManager::GetLoggerCmdChannel(const uint8_t dev_type, const uint32_t h
+ void DeviceManager::Destory() {
+   detection_host_ip_ = "";
+ 
+-  if (detection_socket_ > 0) {
+-    detection_io_thread_->GetLoop().lock()->RemoveDelegate(detection_socket_, this);
++  for (const socket_t detection_socket : detection_sockets_) {
++    if (detection_socket > 0) {
++      detection_io_thread_->GetLoop().lock()->RemoveDelegate(detection_socket, this);
++    }
+   }
+ 
+   if (detection_broadcast_socket_ > 0) {
+@@ -859,10 +886,14 @@ void DeviceManager::Destory() {
+     detection_thread_->join();
+     detection_thread_ = nullptr;
+ 
+-    if (detection_socket_ > 0) {
+-      util::CloseSock(detection_socket_);
+-      detection_socket_ = -1;
++    for (socket_t& detection_socket : detection_sockets_) {
++      if (detection_socket > 0) {
++        util::CloseSock(detection_socket);
++        detection_socket = -1;
++      }
+     }
++    detection_sockets_.clear();
++    detection_socket_ = -1;
+ 
+     if (detection_broadcast_socket_ > 0) {
+       util::CloseSock(detection_broadcast_socket_);
+@@ -893,6 +924,7 @@ void DeviceManager::Destory() {
+ 
+   is_view_ = false;
+   detection_host_ip_ = "";
++  detection_host_ips_.clear();
+   
+   {
+     std::lock_guard<std::mutex> lock(view_device_mutex_);
+diff --git a/sdk_core/device_manager.h b/sdk_core/device_manager.h
+--- a/sdk_core/device_manager.h
++++ b/sdk_core/device_manager.h
+@@ -161,8 +161,7 @@ class DeviceManager : public IOLoop::IOLoopDelegate {
+ 
+   socket_t detection_socket_;
+   socket_t detection_broadcast_socket_;
+-
+-  //socket_t detection_socket2_;
++  std::vector<socket_t> detection_sockets_;
+ 
+   std::vector<socket_t> socket_vec_;
+   std::mutex mutex_cmd_channel_;
+@@ -190,6 +189,7 @@ class DeviceManager : public IOLoop::IOLoopDelegate {
+ 
+   bool is_view_;
+   std::string detection_host_ip_;
++  std::vector<std::string> detection_host_ips_;
+   
+   std::mutex view_device_mutex_;
+   std::map<uint32_t, ViewDevice> view_devices_;

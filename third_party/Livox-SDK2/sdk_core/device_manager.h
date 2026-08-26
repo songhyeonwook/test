@@ -161,8 +161,7 @@ class DeviceManager : public IOLoop::IOLoopDelegate {
 
   socket_t detection_socket_;
   socket_t detection_broadcast_socket_;
-
-  //socket_t detection_socket2_;
+  std::vector<socket_t> detection_sockets_;
 
   std::vector<socket_t> socket_vec_;
   std::mutex mutex_cmd_channel_;
@@ -190,6 +189,7 @@ class DeviceManager : public IOLoop::IOLoopDelegate {
 
   bool is_view_;
   std::string detection_host_ip_;
+  std::vector<std::string> detection_host_ips_;
   
   std::mutex view_device_mutex_;
   std::map<uint32_t, ViewDevice> view_devices_;

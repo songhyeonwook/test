@@ -7,13 +7,13 @@
       "cmd_data_port": 56100,
       "push_msg_port": 56200,
       "point_data_port": 56300,
-      "imu_data_port": 56401,
+      "imu_data_port": 56400,
       "log_data_port": 56500
     },
     "host_net_info" : [
       {
         "lidar_ip": ["192.168.1.135"],
-        "host_ip": "192.168.1.2",
+        "host_ip": "192.168.1.50",
         "cmd_data_port": 56101,
         "push_msg_port": 56201,
         "point_data_port": 56301,
