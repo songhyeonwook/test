@@ -1,18 +1,41 @@
-// 4WS 하부 모터 노드 (rbio TransferRobot motor_node 구조를 따른다)
+// 4WS 하부 모터 노드 (rbio TransferRobot motor_node 구조 + lowcon 모드 체계)
 //
 //  - 주행 ID 1/3 : Profile Velocity(mode 3), 0x60FF 로 속도 명령
 //  - 조향 ID 2/4 : Profile Position(mode 1), 0x607A 로 목표 각도 명령
 //  - 조향은 New set-point(bit4) / ACK(bit12) 핸드셰이크로 확실히 갱신한다
-//  - 시동 시 Fault reset 후 조향축을 0 도로 센터링하고, 중립 cmd_vel 을
-//    한 번 받은 뒤에야 주행을 허용한다
-//  - 오도메트리는 앞/뒤 구동 속도(0x606C)와 앞/뒤 조향각(0x6064) 4개 피드백으로
-//    차체 (vx, vy, wz) 를 역산하는 4WS 모델을 쓴다. odom -> base_link TF 는
-//    기본적으로 내지 않는다 (hw 에서는 fast_lio 의 tf_2d.py 가 담당).
+//  - 시동 시 Fault reset 후 조향축을 0 도로 센터링하고 mode 0(정렬)에서 대기한다
 //
-//  diff 모드: rbio 의 도킹 모드를 일반화한 것. 앞/뒤 조향을 diff_mode_steer_deg
-//  (기본 90 도)로 돌려 고정한 뒤, diff/cmd_vel 의 linear.y(횡이동, + 좌) 와
-//  angular.z(제자리 회전) 만으로 차동구동처럼 움직인다. 오도메트리는 실제
-//  조향각을 쓰는 일반식이라 모드 전환 중에도 끊기지 않는다.
+// 토픽
+//   /mode                          std_msgs/Int32  0=재정렬, 1=애커만(4WS 역위상), 2=디프
+//   /cmd_vel                       geometry_msgs/Twist
+//   /odom                          nav_msgs/Odometry           (발행)
+//   /steer_angle_deg               std_msgs/Float32MultiArray  (발행)
+//                                    [전륜실제, 후륜실제, 전륜지령, 후륜지령]
+//   motor_node/command_ack         std_msgs/String
+//   motor_node/diagnostics         diagnostic_msgs/DiagnosticArray (latched)
+//   motor_node/initialization_status  std_msgs/String  latched, "STATE|detail"
+//   motor_node/drive_mode          std_msgs/String  latched, "MODE|detail"
+// 서비스
+//   motor_node/initialize          std_srvs/Trigger  4축 재초기화 + 조향 센터링
+//   motor_node/reset_odom          std_srvs/Trigger  오도메트리 원점 리셋
+//
+// 모드 전환: 주행이 완전히 멈춘 뒤 조향을 목표 각도(정렬/애커만=0도, 디프=diff_steer_deg)
+//   로 돌리고, 도달하면 모드가 활성화된다. 디프 모드는 cmd_vel 의 linear.x(또는 y) 를
+//   횡이동, angular.z 를 제자리 회전으로 해석한다.
+//
+// ── 오도메트리 (모드 무관 단일 모델) ─────────────────────────────
+//   전/후 축을 각각 조향 가능한 2축 플랫폼으로 보고, 측정된 조향각과 측정된
+//   휠 속도로부터 몸체 속도를 직접 역산한다. 지령/모드는 전혀 쓰지 않는다.
+//
+//     접지점  앞 p_f = (+L/2, 0),  뒤 p_r = (-L/2, 0)
+//     강체    v_wheel = v_body + omega x p
+//       vx           = v_f cos(df)      vx           = v_r cos(dr)
+//       vy + w*L/2   = v_f sin(df)      vy - w*L/2   = v_r sin(dr)
+//     최소자승해
+//       vx = ( v_f cos(df) + v_r cos(dr) ) / 2
+//       vy = ( v_f sin(df) + v_r sin(dr) ) / 2
+//       w  = ( v_f sin(df) - v_r sin(dr) ) / L
+//
 
 #include <algorithm>
 #include <array>
@@ -40,8 +63,9 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -82,6 +106,8 @@ constexpr uint16_t STATUS_STATE_MASK = 0x006F;
 constexpr uint16_t STATUS_OPERATION_ENABLED = 0x0027;
 constexpr uint16_t STATUS_SETPOINT_ACKNOWLEDGED = 1U << 12;
 constexpr auto MOTOR_FEEDBACK_TIMEOUT = std::chrono::milliseconds(300);
+constexpr double DEG2RAD = M_PI / 180.0;
+constexpr double RAD2DEG = 180.0 / M_PI;
 
 bool operation_enabled(uint16_t status_word)
 {
@@ -104,14 +130,15 @@ class MotorNode : public rclcpp::Node
   public:
     MotorNode() : Node("motor_node")
     {
+        sub_mode_ = this->create_subscription<std_msgs::msg::Int32>(
+            "mode", 10, std::bind(&MotorNode::mode_cb, this, std::placeholders::_1));
         sub_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "cmd_vel", 10, std::bind(&MotorNode::cmd_vel_cb, this, std::placeholders::_1));
-        sub_diff_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
-            "diff/cmd_vel", 10,
-            std::bind(&MotorNode::diff_cmd_vel_cb, this, std::placeholders::_1));
         pub_command_ack_ =
             this->create_publisher<std_msgs::msg::String>("motor_node/command_ack", 10);
         pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+        pub_steer_ =
+            this->create_publisher<std_msgs::msg::Float32MultiArray>("steer_angle_deg", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         auto latched_qos = rclcpp::QoS(rclcpp::KeepLast(1));
@@ -123,51 +150,18 @@ class MotorNode : public rclcpp::Node
             "motor_node/initialization_status", latched_qos);
         pub_drive_mode_status_ =
             this->create_publisher<std_msgs::msg::String>("motor_node/drive_mode", latched_qos);
-        srv_set_diff_mode_ = this->create_service<std_srvs::srv::SetBool>(
-            "motor_node/set_diff_mode", std::bind(&MotorNode::set_diff_mode_cb, this,
-                                                  std::placeholders::_1, std::placeholders::_2));
-        srv_initialize_ = this->create_service<std_srvs::srv::Trigger>(
-            "motor_node/initialize", [this](const std_srvs::srv::Trigger::Request::SharedPtr,
-                                            std_srvs::srv::Trigger::Response::SharedPtr response) {
-                if (initialization_in_progress_ || steering_recovery_requested_) {
-                    response->success = false;
-                    response->message = "Motor initialization is already running";
-                    return;
-                }
-                if (drive_mode_ != DriveMode::NORMAL) {
-                    response->success = false;
-                    response->message = "Exit diff mode before lower motor initialization";
-                    return;
-                }
-                if (can_sock_ < 0) {
-                    response->success = false;
-                    response->message = "CAN socket is unavailable";
-                    return;
-                }
-                if (drive_fault_active()) {
-                    response->success = false;
-                    response->message = "Drive motor fault must be serviced before initialization";
-                    return;
-                }
 
-                if (recovery_state_ == SteeringRecoveryState::FAILED) {
-                    recovery_state_ = SteeringRecoveryState::IDLE;
-                }
-                steering_recovery_requested_ = true;
-                initialization_complete_ = false;
-                motion_inhibited_ = true;
-                awaiting_neutral_command_ = false;
-                set_initialization_status("INITIALIZING", "Lower motor initialization requested",
-                                          false);
-                response->success = true;
-                response->message = "Lower motor initialization accepted";
-            });
+        srv_initialize_ = this->create_service<std_srvs::srv::Trigger>(
+            "motor_node/initialize", std::bind(&MotorNode::initialize_cb, this,
+                                               std::placeholders::_1, std::placeholders::_2));
+        srv_reset_odom_ = this->create_service<std_srvs::srv::Trigger>(
+            "motor_node/reset_odom", std::bind(&MotorNode::reset_odom_cb, this,
+                                               std::placeholders::_1, std::placeholders::_2));
 
         last_cmd_time_ = this->now();
-        last_diff_cmd_time_ = this->now();
         last_odom_time_ = this->now();
 
-        // --- 파라미터 (rbio 와 동일 기본값) ---
+        // --- 조향 프로파일 (rbio 와 동일 기본값) ---
         steering_profile_velocity_ = std::clamp(
             static_cast<int>(this->declare_parameter<int>("steering_profile_velocity", 40000)),
             1000, 200000);
@@ -180,38 +174,42 @@ class MotorNode : public rclcpp::Node
         max_steering_angle_rad_ =
             std::clamp(this->declare_parameter<double>("max_steering_angle_deg", MAX_STEER_DEG),
                        30.0, 85.0) *
-            M_PI / 180.0;
-        // 선속도는 0.2 m/s로 제한하고, 0.18 m/s 대각선 주행의
-        // 45도 조향 명령이 잘리지 않도록 회전 성분은 0.3 rad/s까지 허용한다.
-        max_linear_speed_ =
-            std::clamp(this->declare_parameter<double>("max_linear_speed", 0.2), 0.01, 1.0);
-        max_angular_speed_ =
-            std::clamp(this->declare_parameter<double>("max_angular_speed", 0.3), 0.01, 2.0);
+            DEG2RAD;
 
-        // --- diff 모드 파라미터 ---
-        // 조향을 이 각도로 돌려 고정한다. 펄스 오버라이드(0 이 아니면)가 우선.
-        diff_mode_steer_deg_ =
-            std::clamp(this->declare_parameter<double>("diff_mode_steer_deg", 90.0), 45.0, 95.0);
-        diff_front_pulse_ = this->declare_parameter<int>("diff_front_pulse", 0);
-        diff_rear_pulse_ = this->declare_parameter<int>("diff_rear_pulse", 0);
-        diff_max_lateral_speed_ = std::clamp(
-            this->declare_parameter<double>("diff_max_lateral_speed", 0.10), 0.01, 0.5);
-        diff_max_angular_speed_ = std::clamp(
-            this->declare_parameter<double>("diff_max_angular_speed", 0.20), 0.01, 1.0);
+        // --- 속도 상한 (lowcon 파라미터명) ---
+        max_linear_vel_ =
+            std::clamp(this->declare_parameter<double>("max_linear_vel", 0.2), 0.01, 1.0);
+        max_angular_vel_ =
+            std::clamp(this->declare_parameter<double>("max_angular_vel", 0.3), 0.01, 2.0);
+        cmd_vel_timeout_s_ =
+            std::max(0.05, this->declare_parameter<double>("cmd_vel_timeout_s", 0.5));
 
-        // --- 오도메트리 파라미터 ---
-        odom_frame_ = this->declare_parameter<std::string>("odom_frame", "odom");
-        base_frame_ = this->declare_parameter<std::string>("base_frame", "base_link");
+        // --- 디프 모드 (lowcon 파라미터명) ---
+        //   전후륜 각도를 따로 줄 수 있다 (0 이면 diff_steer_deg 공통).
+        //   rbio 의 docking_front_pulse/rear_pulse 가 서로 달랐던 것과 같은 이유다.
+        diff_steer_deg_ =
+            std::clamp(this->declare_parameter<double>("diff_steer_deg", 90.0), 45.0, 95.0);
+        diff_steer_front_deg_ = this->declare_parameter<double>("diff_steer_front_deg", 0.0);
+        diff_steer_rear_deg_ = this->declare_parameter<double>("diff_steer_rear_deg", 0.0);
+        diff_max_linear_vel_ =
+            std::max(0.0, this->declare_parameter<double>("diff_max_linear_vel", 0.0));
+        diff_max_angular_vel_ =
+            std::max(0.0, this->declare_parameter<double>("diff_max_angular_vel", 0.0));
+        diff_lateral_ = this->declare_parameter<bool>("diff_linear_x_is_lateral", true);
+
+        // --- 오도메트리 (lowcon 파라미터명) ---
+        odom_frame_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
+        base_frame_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
         // hw 에서는 fast_lio_localization/tf_2d.py 가 odom->base_link 를 내므로 기본 false
         publish_odom_tf_ = this->declare_parameter<bool>("publish_odom_tf", false);
-        odom_velocity_deadband_ = std::clamp(
-            this->declare_parameter<double>("odom_velocity_deadband", 0.003), 0.0, 0.05);
+        odom_v_deadband_ = std::clamp(
+            this->declare_parameter<double>("odom_wheel_deadband_mps", 0.005), 0.0, 0.05);
 
         if (init_can_socket() < 0) {
             RCLCPP_ERROR(this->get_logger(), "CAN Socket Init Failed!");
             set_initialization_status("FAILED", "CAN socket initialization failed", false);
-            drive_mode_ = DriveMode::FAILED;
-            publish_drive_mode_status("CAN socket initialization failed");
+            failed_ = true;
+            publish_mode_status("CAN socket initialization failed");
             diagnostics_timer_ =
                 this->create_wall_timer(250ms, std::bind(&MotorNode::publish_diagnostics, this));
             return;
@@ -246,16 +244,17 @@ class MotorNode : public rclcpp::Node
         steering_recovery_requested_ = true;
         set_initialization_status("INITIALIZING", "Startup lower motor initialization queued",
                                   false);
-        publish_drive_mode_status("Normal 4WS mode; startup centering queued");
+        publish_mode_status("Startup centering queued");
 
         timer_ = this->create_wall_timer(20ms, std::bind(&MotorNode::control_loop, this));
         diagnostics_timer_ =
             this->create_wall_timer(250ms, std::bind(&MotorNode::publish_diagnostics, this));
         RCLCPP_INFO(this->get_logger(),
                     "4WS motor driver configured; startup centering queued "
-                    "(max_v=%.2f m/s, max_w=%.2f rad/s, max_steer=%.1f deg, odom_tf=%s)",
-                    max_linear_speed_, max_angular_speed_, max_steering_angle_rad_ * 180.0 / M_PI,
-                    publish_odom_tf_ ? "on" : "off");
+                    "(max_v=%.2f m/s, max_w=%.2f rad/s, max_steer=%.1f deg, diff=%.1f deg, "
+                    "odom_tf=%s)",
+                    max_linear_vel_, max_angular_vel_, max_steering_angle_rad_ * RAD2DEG,
+                    diff_steer_deg_, publish_odom_tf_ ? "on" : "off");
     }
 
     ~MotorNode()
@@ -293,23 +292,26 @@ class MotorNode : public rclcpp::Node
         FAILED
     };
 
-    enum class DriveMode { NORMAL, ENTERING_DIFF, DIFF, EXITING_DIFF, FAILED };
+    // /mode 값과 1:1
+    enum class Mode : int { ALIGN = 0, ACKERMANN = 1, DIFF = 2 };
 
     int can_sock_ = -1;
-    double cmd_vx_ = 0.0, cmd_wz_ = 0.0;
-    double diff_cmd_vy_ = 0.0, diff_cmd_wz_ = 0.0;
+    double cmd_vx_ = 0.0, cmd_vy_ = 0.0, cmd_wz_ = 0.0;
 
     // 피드백
     double current_drive_vel_front_ = 0.0;   // [m/s] 바퀴 접선 속도 (부호 포함)
     double current_drive_vel_rear_ = 0.0;
-    double current_steer_angle_front_ = 0.0; // [rad] 앞바퀴 조향 (+ = 좌회전)
+    double current_steer_angle_front_ = 0.0; // [rad] 앞바퀴 조향 (+ = 좌)
     double current_steer_angle_rear_ = 0.0;  // [rad] 뒷바퀴 조향
     int32_t current_steer_pulse_front_ = 0;
     int32_t current_steer_pulse_rear_ = 0;
+    double steer_cmd_deg_front_ = 0.0; // 진단/steer_angle_deg 용 지령각
+    double steer_cmd_deg_rear_ = 0.0;
 
     // 오도메트리 적분값
     double x_ = 0.0, y_ = 0.0, th_ = 0.0;
-    double odom_vx_ = 0.0, odom_vy_ = 0.0, odom_wz_ = 0.0;
+    double meas_vx_ = 0.0, meas_vy_ = 0.0, meas_wz_ = 0.0;
+    bool odom_valid_ = false;
 
     // 조향 셋포인트 핸드셰이크
     int32_t last_pulse_front_ = 0;
@@ -327,8 +329,16 @@ class MotorNode : public rclcpp::Node
     std::array<MotorStatus, 5> motor_status_{}; // CANopen node ID 1~4 사용
     SteeringRecoveryState recovery_state_ = SteeringRecoveryState::IDLE;
     std::chrono::steady_clock::time_point recovery_deadline_{};
-    DriveMode drive_mode_ = DriveMode::NORMAL;
-    std::chrono::steady_clock::time_point drive_mode_deadline_{};
+
+    // 모드
+    Mode mode_ = Mode::ALIGN;          // 활성 모드
+    Mode target_mode_ = Mode::ALIGN;   // 전환 중 목표
+    bool transitioning_ = false;
+    bool mode_request_pending_ = false;
+    Mode requested_mode_ = Mode::ALIGN;
+    std::chrono::steady_clock::time_point mode_deadline_{};
+    bool failed_ = false;
+
     bool motion_inhibited_ = false;
     bool awaiting_neutral_command_ = false;
     bool initialization_in_progress_ = false;
@@ -342,19 +352,21 @@ class MotorNode : public rclcpp::Node
     int steering_profile_velocity_ = 40000;
     int steering_profile_acceleration_ = 40000;
     int steering_profile_deceleration_ = 40000;
-    double max_steering_angle_rad_ = MAX_STEER_DEG * M_PI / 180.0;
-    double max_linear_speed_ = 0.2;
-    double max_angular_speed_ = 0.3;
-    double diff_mode_steer_deg_ = 90.0;
-    int32_t diff_front_pulse_ = 0;
-    int32_t diff_rear_pulse_ = 0;
-    double diff_max_lateral_speed_ = 0.10;
-    double diff_max_angular_speed_ = 0.20;
+    double max_steering_angle_rad_ = MAX_STEER_DEG * DEG2RAD;
+    double max_linear_vel_ = 0.2;
+    double max_angular_vel_ = 0.3;
+    double cmd_vel_timeout_s_ = 0.5;
+    double diff_steer_deg_ = 90.0;
+    double diff_steer_front_deg_ = 0.0;
+    double diff_steer_rear_deg_ = 0.0;
+    double diff_max_linear_vel_ = 0.0;
+    double diff_max_angular_vel_ = 0.0;
+    bool diff_lateral_ = true;
 
     std::string odom_frame_ = "odom";
     std::string base_frame_ = "base_link";
     bool publish_odom_tf_ = false;
-    double odom_velocity_deadband_ = 0.003;
+    double odom_v_deadband_ = 0.005;
 
     static constexpr int RECOVERY_ERROR_READ_MS = 250;
     static constexpr int RECOVERY_STEP_MS = 50;
@@ -364,26 +376,25 @@ class MotorNode : public rclcpp::Node
     static constexpr int STATUS_FRESH_TIMEOUT_MS = 300;
     static constexpr int SETPOINT_RETRY_CYCLES = 50;
     static constexpr int32_t SETPOINT_STALL_PULSES = 1000;
+    static constexpr int MODE_TRANSITION_TIMEOUT_MS = 30000;
+    static constexpr double DRIVE_STOPPED_TOLERANCE_MPS = 0.01;
     static constexpr double RECOVERY_ZERO_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
     static constexpr double DRIVE_STEERING_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
     static constexpr double ODOM_MAX_DT_SEC = 0.5;
-    static constexpr int DRIVE_MODE_TRANSITION_TIMEOUT_MS = 30000;
-    static constexpr int DIFF_COMMAND_TIMEOUT_MS = 250;
-    static constexpr double DRIVE_STOPPED_TOLERANCE_MPS = 0.01;
 
     rclcpp::Time last_cmd_time_;
-    rclcpp::Time last_diff_cmd_time_;
     rclcpp::Time last_odom_time_;
 
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_mode_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
-    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_diff_cmd_vel_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_command_ack_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr pub_steer_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_diagnostics_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_initialization_status_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_drive_mode_status_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_initialize_;
-    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_set_diff_mode_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_odom_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr diagnostics_timer_;
@@ -553,29 +564,29 @@ class MotorNode : public rclcpp::Node
         }
     }
 
-    const char* drive_mode_name() const
+    static const char* mode_name(Mode m)
     {
-        switch (drive_mode_) {
-        case DriveMode::NORMAL:
-            return "NORMAL";
-        case DriveMode::ENTERING_DIFF:
-            return "ENTERING_DIFF";
-        case DriveMode::DIFF:
+        switch (m) {
+        case Mode::ALIGN:
+            return "ALIGN";
+        case Mode::ACKERMANN:
+            return "ACKERMANN";
+        case Mode::DIFF:
             return "DIFF";
-        case DriveMode::EXITING_DIFF:
-            return "EXITING_DIFF";
-        case DriveMode::FAILED:
-            return "FAILED";
         }
-        return "FAILED";
+        return "ALIGN";
     }
 
-    void publish_drive_mode_status(const std::string& detail)
+    void publish_mode_status(const std::string& detail)
     {
         if (!pub_drive_mode_status_)
             return;
         std_msgs::msg::String status;
-        status.data = std::string(drive_mode_name()) + "|" + detail;
+        std::string name = failed_ ? "FAILED"
+                           : transitioning_
+                               ? std::string("TO_") + mode_name(target_mode_)
+                               : mode_name(mode_);
+        status.data = name + "|" + detail;
         pub_drive_mode_status_->publish(status);
     }
 
@@ -590,96 +601,37 @@ class MotorNode : public rclcpp::Node
         return static_cast<int32_t>(std::llround(deg * STEER_RATIO * ENCODER_PPR / 360.0));
     }
 
-    int32_t diff_target_pulse_front() const
+    double diff_front_deg() const
     {
-        return diff_front_pulse_ != 0 ? diff_front_pulse_ : deg_to_steer_pulse(diff_mode_steer_deg_);
+        return diff_steer_front_deg_ != 0.0 ? diff_steer_front_deg_ : diff_steer_deg_;
     }
-    int32_t diff_target_pulse_rear() const
+    double diff_rear_deg() const
     {
-        return diff_rear_pulse_ != 0 ? diff_rear_pulse_ : deg_to_steer_pulse(diff_mode_steer_deg_);
+        return diff_steer_rear_deg_ != 0.0 ? diff_steer_rear_deg_ : diff_steer_deg_;
     }
 
-    void fail_drive_mode(const std::string& reason)
+    // 모드별 조향 목표각 [deg]. ALIGN/ACKERMANN 은 0 (애커만 주행 중 각도는 제어 루프가 결정).
+    void mode_steer_targets_deg(Mode m, double& front, double& rear) const
+    {
+        if (m == Mode::DIFF) {
+            front = diff_front_deg();
+            rear = diff_rear_deg();
+        } else {
+            front = 0.0;
+            rear = 0.0;
+        }
+    }
+
+    void fail_mode(const std::string& reason)
     {
         stop_drive_motors();
-        diff_cmd_vy_ = 0.0;
-        diff_cmd_wz_ = 0.0;
-        drive_mode_ = DriveMode::FAILED;
+        cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
+        transitioning_ = false;
+        mode_request_pending_ = false;
+        failed_ = true;
         motion_inhibited_ = true;
-        publish_drive_mode_status(reason);
-        RCLCPP_ERROR(this->get_logger(), "Drive mode transition failed: %s", reason.c_str());
-    }
-
-    void set_diff_mode_cb(const std_srvs::srv::SetBool::Request::SharedPtr request,
-                          std_srvs::srv::SetBool::Response::SharedPtr response)
-    {
-        stop_drive_motors();
-        cmd_vx_ = 0.0;
-        cmd_wz_ = 0.0;
-        diff_cmd_vy_ = 0.0;
-        diff_cmd_wz_ = 0.0;
-
-        if (can_sock_ < 0) {
-            response->success = false;
-            response->message = "CAN socket is unavailable";
-            return;
-        }
-        if (initialization_in_progress_ || steering_recovery_requested_) {
-            response->success = false;
-            response->message = "Lower motor initialization is running";
-            return;
-        }
-        if (!initialization_complete_ || !all_motors_operational()) {
-            response->success = false;
-            response->message = "All four lower motors must be operational";
-            return;
-        }
-
-        if (request->data) {
-            if (drive_mode_ == DriveMode::DIFF || drive_mode_ == DriveMode::ENTERING_DIFF) {
-                response->success = true;
-                response->message = "Diff mode is already active or entering";
-                return;
-            }
-            if (drive_mode_ != DriveMode::NORMAL) {
-                response->success = false;
-                response->message = "Return to normal mode before entering diff mode";
-                return;
-            }
-            awaiting_neutral_command_ = false;
-            motion_inhibited_ = false;
-            neutral_steering_hold_latched_ = false;
-            drive_mode_ = DriveMode::ENTERING_DIFF;
-            drive_mode_deadline_ = std::chrono::steady_clock::now() +
-                                   std::chrono::milliseconds(DRIVE_MODE_TRANSITION_TIMEOUT_MS);
-            publish_drive_mode_status("Drive stopped; steering toward diff position");
-            response->success = true;
-            response->message = "Diff mode transition accepted";
-            RCLCPP_WARN(this->get_logger(), "Entering diff mode: target pulses front=%d rear=%d",
-                        diff_target_pulse_front(), diff_target_pulse_rear());
-            return;
-        }
-
-        if (drive_mode_ == DriveMode::NORMAL || drive_mode_ == DriveMode::EXITING_DIFF) {
-            response->success = true;
-            response->message = "Normal mode is already active or returning";
-            return;
-        }
-        if (steering_fault_active() || drive_fault_active()) {
-            response->success = false;
-            response->message = "Motor fault must be cleared before leaving diff mode";
-            return;
-        }
-        motion_inhibited_ = false;
-        awaiting_neutral_command_ = false;
-        neutral_steering_hold_latched_ = false;
-        drive_mode_ = DriveMode::EXITING_DIFF;
-        drive_mode_deadline_ = std::chrono::steady_clock::now() +
-                               std::chrono::milliseconds(DRIVE_MODE_TRANSITION_TIMEOUT_MS);
-        publish_drive_mode_status("Drive stopped; steering toward zero position");
-        response->success = true;
-        response->message = "Normal mode transition accepted";
-        RCLCPP_WARN(this->get_logger(), "Leaving diff mode; steering toward zero");
+        publish_mode_status(reason);
+        RCLCPP_ERROR(this->get_logger(), "Mode transition failed: %s", reason.c_str());
     }
 
     bool all_motors_operational() const
@@ -718,6 +670,10 @@ class MotorNode : public rclcpp::Node
     bool both_steering_status_fresh() const
     {
         return status_is_fresh(ID_FRONT_STEER) && status_is_fresh(ID_REAR_STEER);
+    }
+    bool both_drive_status_fresh() const
+    {
+        return status_is_fresh(ID_FRONT_DRIVE) && status_is_fresh(ID_REAR_DRIVE);
     }
     bool steering_fault_active() const
     {
@@ -808,12 +764,12 @@ class MotorNode : public rclcpp::Node
                     current_steer_pulse_front_ = feedback;
                     const double deg =
                         static_cast<double>(feedback) * 360.0 / (STEER_RATIO * ENCODER_PPR);
-                    current_steer_angle_front_ = deg * M_PI / 180.0;
+                    current_steer_angle_front_ = deg * DEG2RAD;
                 } else if (id == ID_REAR_STEER) {
                     current_steer_pulse_rear_ = feedback;
                     const double deg =
                         static_cast<double>(feedback) * 360.0 / (STEER_RATIO * ENCODER_PPR);
-                    current_steer_angle_rear_ = deg * M_PI / 180.0;
+                    current_steer_angle_rear_ = deg * DEG2RAD;
                 }
 
                 const bool current_fault = has_fault(id);
@@ -823,8 +779,8 @@ class MotorNode : public rclcpp::Node
                                  "Motor ID %d FAULT, statusword=0x%04X, "
                                  "steering(front/rear)=%.1f/%.1f deg",
                                  id, static_cast<unsigned>(status.statusword),
-                                 current_steer_angle_front_ * 180.0 / M_PI,
-                                 current_steer_angle_rear_ * 180.0 / M_PI);
+                                 current_steer_angle_front_ * RAD2DEG,
+                                 current_steer_angle_rear_ * RAD2DEG);
                     request_error_code(id);
                     if (id == ID_FRONT_DRIVE || id == ID_REAR_DRIVE) {
                         set_initialization_status(
@@ -854,28 +810,19 @@ class MotorNode : public rclcpp::Node
         send_drive_pdo(ID_REAR_DRIVE, 0, 0x000F);
     }
 
-    // --- 4WS 오도메트리 ---
-    //
-    // 앞/뒤 조향축이 독립이라 바이시클 모델(앞바퀴 하나로 근사)로는 역위상 회전,
-    // 동위상 크랩, 한쪽만 꺾인 상태를 구분하지 못한다. 두 바퀴의 속도 벡터를
-    // 강체 운동식으로 풀어 차체 속도 (vx, vy, wz) 를 직접 구한다.
-    //
-    //   앞바퀴 위치 (+L/2, 0):  v_f = (vx,  vy + wz*L/2) = v_f*(cos δf, sin δf)
-    //   뒷바퀴 위치 (-L/2, 0):  v_r = (vx,  vy - wz*L/2) = v_r*(cos δr, sin δr)
-    //
-    //   vx = (v_f cos δf + v_r cos δr) / 2
-    //   vy = (v_f sin δf + v_r sin δr) / 2
-    //   wz = (v_f sin δf - v_r sin δr) / L
-    //
-    // 후진 시 rbio 방식대로 바퀴각은 ±90도 안으로 접고 속도 부호가 뒤집히므로
-    // (v_f, v_r 은 부호를 가진 접선 속도) 식이 그대로 성립한다.
+    // --- 4WS 오도메트리 (모드 무관, 측정값만 사용) ---
+    bool odom_inputs_valid() const
+    {
+        return both_steering_status_fresh() && both_drive_status_fresh();
+    }
+
     void compute_body_velocity(double& vx, double& vy, double& wz) const
     {
-        double v_f = status_is_fresh(ID_FRONT_DRIVE) ? current_drive_vel_front_ : 0.0;
-        double v_r = status_is_fresh(ID_REAR_DRIVE) ? current_drive_vel_rear_ : 0.0;
-        if (std::abs(v_f) < odom_velocity_deadband_)
+        double v_f = current_drive_vel_front_;
+        double v_r = current_drive_vel_rear_;
+        if (std::abs(v_f) < odom_v_deadband_)
             v_f = 0.0;
-        if (std::abs(v_r) < odom_velocity_deadband_)
+        if (std::abs(v_r) < odom_v_deadband_)
             v_r = 0.0;
 
         const double cf = std::cos(current_steer_angle_front_);
@@ -893,23 +840,35 @@ class MotorNode : public rclcpp::Node
         const rclcpp::Time now = this->now();
         double dt = (now - last_odom_time_).seconds();
         last_odom_time_ = now;
-        if (dt <= 0.0 || dt > ODOM_MAX_DT_SEC) {
-            // 시계 점프(sim time 리셋 등)나 긴 정지 후 첫 틱은 적분하지 않는다.
-            dt = 0.0;
+
+        odom_valid_ = odom_inputs_valid();
+        if (odom_valid_) {
+            compute_body_velocity(meas_vx_, meas_vy_, meas_wz_);
+        } else {
+            meas_vx_ = meas_vy_ = meas_wz_ = 0.0;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                                 "Odometry inputs unavailable (steer %s, drive %s); pose frozen",
+                                 both_steering_status_fresh() ? "OK" : "STALE",
+                                 both_drive_status_fresh() ? "OK" : "STALE");
         }
 
-        compute_body_velocity(odom_vx_, odom_vy_, odom_wz_);
-
-        // 2차 정확도(midpoint) 적분: 회전 중 헤딩 변화를 반영한다.
-        const double th_mid = th_ + 0.5 * odom_wz_ * dt;
-        const double c = std::cos(th_mid);
-        const double s = std::sin(th_mid);
-        x_ += (odom_vx_ * c - odom_vy_ * s) * dt;
-        y_ += (odom_vx_ * s + odom_vy_ * c) * dt;
-        th_ = normalize_angle(th_ + odom_wz_ * dt);
+        // 2차 정확도(midpoint) 적분. 시계 점프(sim time 리셋 등)는 적분하지 않는다.
+        if (odom_valid_ && dt > 0.0 && dt <= ODOM_MAX_DT_SEC) {
+            const double th_mid = th_ + 0.5 * meas_wz_ * dt;
+            const double c = std::cos(th_mid);
+            const double s = std::sin(th_mid);
+            x_ += (meas_vx_ * c - meas_vy_ * s) * dt;
+            y_ += (meas_vx_ * s + meas_vy_ * c) * dt;
+            th_ = normalize_angle(th_ + meas_wz_ * dt);
+        }
 
         tf2::Quaternion q;
         q.setRPY(0.0, 0.0, th_);
+        geometry_msgs::msg::Quaternion qm;
+        qm.x = q.x();
+        qm.y = q.y();
+        qm.z = q.z();
+        qm.w = q.w();
 
         nav_msgs::msg::Odometry odom;
         odom.header.stamp = now;
@@ -918,40 +877,37 @@ class MotorNode : public rclcpp::Node
         odom.pose.pose.position.x = x_;
         odom.pose.pose.position.y = y_;
         odom.pose.pose.position.z = 0.0;
-        odom.pose.pose.orientation.x = q.x();
-        odom.pose.pose.orientation.y = q.y();
-        odom.pose.pose.orientation.z = q.z();
-        odom.pose.pose.orientation.w = q.w();
-        odom.twist.twist.linear.x = odom_vx_;
-        odom.twist.twist.linear.y = odom_vy_;
+        odom.pose.pose.orientation = qm;
+        // 몸체(base_link) 기준 트위스트. 횡속도 vy 도 그대로 싣는다.
+        odom.twist.twist.linear.x = meas_vx_;
+        odom.twist.twist.linear.y = meas_vy_;
         odom.twist.twist.linear.z = 0.0;
         odom.twist.twist.angular.x = 0.0;
         odom.twist.twist.angular.y = 0.0;
-        odom.twist.twist.angular.z = odom_wz_;
+        odom.twist.twist.angular.z = meas_wz_;
 
-        // 평면 로봇: z/roll/pitch 는 관측 불가, 나머지는 휠 슬립을 감안한 보수적 값.
-        const bool moving = std::abs(odom_vx_) > 0.0 || std::abs(odom_vy_) > 0.0 ||
-                            std::abs(odom_wz_) > 0.0;
-        const double pose_xy_var = moving ? 0.01 : 1e-4;
-        const double pose_yaw_var = moving ? 0.05 : 1e-3;
-        const double twist_lin_var = moving ? 1e-3 : 1e-5;
-        const double twist_ang_var = moving ? 1e-2 : 1e-4;
+        // 공분산. 입력이 무효하면 크게 키워 상위 융합기가 무시하도록 한다.
+        const bool moving = odom_valid_ && (meas_vx_ != 0.0 || meas_vy_ != 0.0 || meas_wz_ != 0.0);
+        const double pxy = !odom_valid_ ? 1e6 : (moving ? 1e-2 : 1e-4);
+        const double pth = !odom_valid_ ? 1e6 : (moving ? 5e-2 : 1e-3);
+        const double txy = !odom_valid_ ? 1e6 : (moving ? 1e-3 : 1e-5);
+        const double tth = !odom_valid_ ? 1e6 : (moving ? 1e-2 : 1e-4);
         for (auto& c_ : odom.pose.covariance)
             c_ = 0.0;
         for (auto& c_ : odom.twist.covariance)
             c_ = 0.0;
-        odom.pose.covariance[0] = pose_xy_var;
-        odom.pose.covariance[7] = pose_xy_var;
+        odom.pose.covariance[0] = pxy;
+        odom.pose.covariance[7] = pxy;
         odom.pose.covariance[14] = 1e6;
         odom.pose.covariance[21] = 1e6;
         odom.pose.covariance[28] = 1e6;
-        odom.pose.covariance[35] = pose_yaw_var;
-        odom.twist.covariance[0] = twist_lin_var;
-        odom.twist.covariance[7] = twist_lin_var;
+        odom.pose.covariance[35] = pth;
+        odom.twist.covariance[0] = txy;
+        odom.twist.covariance[7] = txy;
         odom.twist.covariance[14] = 1e6;
         odom.twist.covariance[21] = 1e6;
         odom.twist.covariance[28] = 1e6;
-        odom.twist.covariance[35] = twist_ang_var;
+        odom.twist.covariance[35] = tth;
         pub_odom_->publish(odom);
 
         if (publish_odom_tf_) {
@@ -962,9 +918,19 @@ class MotorNode : public rclcpp::Node
             tf.transform.translation.x = x_;
             tf.transform.translation.y = y_;
             tf.transform.translation.z = 0.0;
-            tf.transform.rotation = odom.pose.pose.orientation;
+            tf.transform.rotation = qm;
             tf_broadcaster_->sendTransform(tf);
         }
+    }
+
+    void publish_steer_angle()
+    {
+        std_msgs::msg::Float32MultiArray m;
+        m.data = {static_cast<float>(current_steer_angle_front_ * RAD2DEG),
+                  static_cast<float>(current_steer_angle_rear_ * RAD2DEG),
+                  static_cast<float>(steer_cmd_deg_front_),
+                  static_cast<float>(steer_cmd_deg_rear_)};
+        pub_steer_->publish(m);
     }
 
     // --- 진단 ---
@@ -994,39 +960,40 @@ class MotorNode : public rclcpp::Node
             diagnostic.message = "not_operation_enabled";
         }
 
-        char status_word[16]{};
-        std::snprintf(status_word, sizeof(status_word), "0x%04X",
-                      static_cast<unsigned>(motor.statusword));
-        diagnostic_msgs::msg::KeyValue status_value;
-        status_value.key = "status_word";
-        status_value.value = status_word;
-        diagnostic.values.push_back(status_value);
+        char buf[32]{};
+        diagnostic_msgs::msg::KeyValue kv;
+        std::snprintf(buf, sizeof(buf), "0x%04X", static_cast<unsigned>(motor.statusword));
+        kv.key = "status_word";
+        kv.value = buf;
+        diagnostic.values.push_back(kv);
 
         if (motor.error_code_valid) {
-            char error_code[16]{};
-            std::snprintf(error_code, sizeof(error_code), "0x%04X",
-                          static_cast<unsigned>(motor.error_code));
-            diagnostic_msgs::msg::KeyValue error_value;
-            error_value.key = "error_code";
-            error_value.value = error_code;
-            diagnostic.values.push_back(error_value);
+            std::snprintf(buf, sizeof(buf), "0x%04X", static_cast<unsigned>(motor.error_code));
+            kv.key = "error_code";
+            kv.value = buf;
+            diagnostic.values.push_back(kv);
         }
-
-        char feedback[32]{};
         if (id == ID_FRONT_DRIVE || id == ID_REAR_DRIVE) {
-            std::snprintf(feedback, sizeof(feedback), "%.3f m/s",
+            std::snprintf(buf, sizeof(buf), "%+.3f",
                           id == ID_FRONT_DRIVE ? current_drive_vel_front_
                                                : current_drive_vel_rear_);
+            kv.key = "wheel_mps";
+            kv.value = buf;
+            diagnostic.values.push_back(kv);
         } else {
-            std::snprintf(feedback, sizeof(feedback), "%.1f deg",
+            std::snprintf(buf, sizeof(buf), "%+.2f",
                           (id == ID_FRONT_STEER ? current_steer_angle_front_
                                                 : current_steer_angle_rear_) *
-                              180.0 / M_PI);
+                              RAD2DEG);
+            kv.key = "steer_deg";
+            kv.value = buf;
+            diagnostic.values.push_back(kv);
+            std::snprintf(buf, sizeof(buf), "%+.2f",
+                          id == ID_FRONT_STEER ? steer_cmd_deg_front_ : steer_cmd_deg_rear_);
+            kv.key = "steer_cmd_deg";
+            kv.value = buf;
+            diagnostic.values.push_back(kv);
         }
-        diagnostic_msgs::msg::KeyValue feedback_value;
-        feedback_value.key = "feedback";
-        feedback_value.value = feedback;
-        diagnostic.values.push_back(feedback_value);
         return diagnostic;
     }
 
@@ -1043,7 +1010,7 @@ class MotorNode : public rclcpp::Node
 
         diagnostic_msgs::msg::DiagnosticArray diagnostics;
         diagnostics.header.stamp = this->now();
-        diagnostics.status.reserve(4);
+        diagnostics.status.reserve(5);
         diagnostics.status.push_back(
             make_motor_diagnostic(ID_FRONT_DRIVE, "motor_node/front_drive"));
         diagnostics.status.push_back(
@@ -1051,6 +1018,40 @@ class MotorNode : public rclcpp::Node
         diagnostics.status.push_back(make_motor_diagnostic(ID_REAR_DRIVE, "motor_node/rear_drive"));
         diagnostics.status.push_back(
             make_motor_diagnostic(ID_REAR_STEER, "motor_node/rear_steering"));
+
+        diagnostic_msgs::msg::DiagnosticStatus node;
+        node.name = "motor_node/node";
+        node.hardware_id = CAN_INTERFACE;
+        if (failed_ || recovery_state_ == SteeringRecoveryState::FAILED ||
+            initialization_state_ == "FAILED") {
+            node.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+        } else if (motion_inhibited_ || !odom_valid_ || transitioning_) {
+            node.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+        } else {
+            node.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+        }
+        node.message = initialization_state_ + ": " + initialization_detail_;
+        char buf[48]{};
+        diagnostic_msgs::msg::KeyValue kv;
+        kv.key = "mode";
+        kv.value = transitioning_ ? std::string("TO_") + mode_name(target_mode_)
+                                  : mode_name(mode_);
+        node.values.push_back(kv);
+        kv.key = "odom_valid";
+        kv.value = odom_valid_ ? "true" : "false";
+        node.values.push_back(kv);
+        kv.key = "motion_inhibited";
+        kv.value = motion_inhibited_ ? "true" : "false";
+        node.values.push_back(kv);
+        kv.key = "awaiting_neutral_cmd";
+        kv.value = awaiting_neutral_command_ ? "true" : "false";
+        node.values.push_back(kv);
+        std::snprintf(buf, sizeof(buf), "%+.3f %+.3f %+.3f", meas_vx_, meas_vy_, meas_wz_);
+        kv.key = "twist_vx_vy_wz";
+        kv.value = buf;
+        node.values.push_back(kv);
+        diagnostics.status.push_back(node);
+
         pub_diagnostics_->publish(diagnostics);
     }
 
@@ -1079,8 +1080,8 @@ class MotorNode : public rclcpp::Node
         initialization_in_progress_ = true;
         initialization_complete_ = false;
         motion_inhibited_ = true;
-        cmd_vx_ = 0.0;
-        cmd_wz_ = 0.0;
+        cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
+        transitioning_ = false;
         stop_drive_motors();
         set_initialization_status("INITIALIZING",
                                   requested ? "Lower motor initialization and steering centering"
@@ -1260,6 +1261,7 @@ class MotorNode : public rclcpp::Node
             // 목표값을 유지하되 New set-point Bit는 다시 올리지 않는다.
             send_steer_pdo(ID_FRONT_STEER, 0, 0x000F);
             send_steer_pdo(ID_REAR_STEER, 0, 0x000F);
+            steer_cmd_deg_front_ = steer_cmd_deg_rear_ = 0.0;
 
             const bool at_zero =
                 both_steering_status_fresh() &&
@@ -1280,13 +1282,15 @@ class MotorNode : public rclcpp::Node
                 setpoint_feedback_front_ = 0;
                 setpoint_feedback_rear_ = 0;
                 neutral_steering_hold_latched_ = false;
-                cmd_vx_ = 0.0;
-                cmd_wz_ = 0.0;
+                cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
                 last_cmd_time_ = this->now();
-                // Nav2가 동일한 제한각 명령을 계속 보내 재차 걸리지 않도록,
-                // 한 번 0 속도 명령을 받을 때까지 주행 차단을 유지한다.
-                awaiting_neutral_command_ = true;
-                motion_inhibited_ = true;
+                // 센터링 완료 -> mode 0(정렬)에서 대기. /mode 로 주행 모드를 골라야 움직인다.
+                mode_ = Mode::ALIGN;
+                target_mode_ = Mode::ALIGN;
+                transitioning_ = false;
+                failed_ = false;
+                awaiting_neutral_command_ = false;
+                motion_inhibited_ = false;
                 initialization_in_progress_ = false;
                 recovery_state_ = SteeringRecoveryState::IDLE;
                 if (recovery_was_requested_) {
@@ -1295,12 +1299,10 @@ class MotorNode : public rclcpp::Node
                 recovery_was_requested_ = false;
                 set_initialization_status(
                     "READY", "All four lower motors operational; steering centered", true);
-                if (drive_mode_ == DriveMode::NORMAL) {
-                    publish_drive_mode_status("Normal 4WS mode ready");
-                }
+                publish_mode_status("Steering centered; waiting for /mode (1=ackermann, 2=diff)");
                 RCLCPP_INFO(this->get_logger(),
-                            "Steering auto-recovery completed: IDs 2 and 4 are at zero. "
-                            "Waiting for a neutral cmd_vel before motion is enabled.");
+                            "Steering centered: IDs 2 and 4 are at zero. mode 0 (ALIGN); "
+                            "send /mode 1 or 2 to drive.");
                 return true;
             }
 
@@ -1318,23 +1320,78 @@ class MotorNode : public rclcpp::Node
         return true;
     }
 
-    // --- diff 모드 전환 / 제어 ---
-    bool process_drive_mode_transition()
+    // --- 모드 요청 / 전환 ---
+    void mode_cb(const std_msgs::msg::Int32::SharedPtr msg)
     {
-        const bool entering = drive_mode_ == DriveMode::ENTERING_DIFF;
-        const bool exiting = drive_mode_ == DriveMode::EXITING_DIFF;
-        if (!entering && !exiting)
+        const int m = msg->data;
+        if (m < 0 || m > 2) {
+            RCLCPP_WARN(this->get_logger(), "Unknown mode %d ignored (0=align, 1=ackermann, 2=diff)",
+                        m);
+            return;
+        }
+        requested_mode_ = static_cast<Mode>(m);
+        mode_request_pending_ = true;
+        RCLCPP_INFO(this->get_logger(), "mode %d (%s) requested", m, mode_name(requested_mode_));
+    }
+
+    // 제어 루프에서 호출. 준비가 안 됐으면 요청을 보류한다.
+    void process_mode_request()
+    {
+        if (!mode_request_pending_)
+            return;
+
+        if (!initialization_complete_ || initialization_in_progress_) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                                 "mode %s pending until initialization completes",
+                                 mode_name(requested_mode_));
+            return;
+        }
+        if (failed_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                                 "mode %s ignored: node is FAILED; call motor_node/initialize",
+                                 mode_name(requested_mode_));
+            mode_request_pending_ = false;
+            return;
+        }
+        mode_request_pending_ = false;
+
+        if (!transitioning_ && requested_mode_ == mode_) {
+            publish_mode_status(std::string(mode_name(mode_)) + " already active");
+            return;
+        }
+        if (transitioning_ && requested_mode_ == target_mode_)
+            return;
+
+        // 전환 시작: 주행 정지 -> 조향 목표각 이동 -> 도달 시 활성화
+        stop_drive_motors();
+        cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
+        awaiting_neutral_command_ = false;
+        neutral_steering_hold_latched_ = false;
+        target_mode_ = requested_mode_;
+        transitioning_ = true;
+        mode_deadline_ = std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(MODE_TRANSITION_TIMEOUT_MS);
+        double f = 0.0, r = 0.0;
+        mode_steer_targets_deg(target_mode_, f, r);
+        publish_mode_status("Drive stopped; steering toward target");
+        RCLCPP_WARN(this->get_logger(), "Mode %s -> %s: steering to F/R=%.1f/%.1f deg",
+                    mode_name(mode_), mode_name(target_mode_), f, r);
+    }
+
+    bool process_mode_transition()
+    {
+        if (!transitioning_)
             return false;
 
         stop_drive_motors();
         const auto now = std::chrono::steady_clock::now();
-        if (now >= drive_mode_deadline_) {
-            fail_drive_mode(entering ? "Diff steering alignment timed out"
-                                     : "Normal steering alignment timed out");
+        if (now >= mode_deadline_) {
+            fail_mode(std::string("Steering alignment for ") + mode_name(target_mode_) +
+                      " timed out");
             return true;
         }
         if (!all_motors_operational()) {
-            fail_drive_mode("Motor feedback stale or motor not operational");
+            fail_mode("Motor feedback stale or motor not operational");
             return true;
         }
 
@@ -1347,8 +1404,12 @@ class MotorNode : public rclcpp::Node
             return true;
         }
 
-        const int32_t target_front = entering ? diff_target_pulse_front() : 0;
-        const int32_t target_rear = entering ? diff_target_pulse_rear() : 0;
+        double f_deg = 0.0, r_deg = 0.0;
+        mode_steer_targets_deg(target_mode_, f_deg, r_deg);
+        steer_cmd_deg_front_ = f_deg;
+        steer_cmd_deg_rear_ = r_deg;
+        const int32_t target_front = deg_to_steer_pulse(f_deg);
+        const int32_t target_rear = deg_to_steer_pulse(r_deg);
         handle_steer_toggle(ID_FRONT_STEER, target_front, last_pulse_front_, toggle_front_,
                             setpoint_retry_front_, setpoint_feedback_front_,
                             current_steer_pulse_front_);
@@ -1364,41 +1425,61 @@ class MotorNode : public rclcpp::Node
                 tolerance;
         if (!target_reached) {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                                 "Steering mode transition: target(F/R)=%d/%d actual(F/R)=%d/%d",
-                                 target_front, target_rear, current_steer_pulse_front_,
-                                 current_steer_pulse_rear_);
+                                 "Mode transition to %s: target(F/R)=%.1f/%.1f actual(F/R)=%.1f/%.1f deg",
+                                 mode_name(target_mode_), f_deg, r_deg,
+                                 current_steer_angle_front_ * RAD2DEG,
+                                 current_steer_angle_rear_ * RAD2DEG);
             return true;
         }
 
-        diff_cmd_vy_ = 0.0;
-        diff_cmd_wz_ = 0.0;
+        mode_ = target_mode_;
+        transitioning_ = false;
+        cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
         neutral_steering_hold_latched_ = false;
-        if (entering) {
-            drive_mode_ = DriveMode::DIFF;
-            last_diff_cmd_time_ = this->now();
-            publish_drive_mode_status("Diff steering aligned; waiting for diff/cmd_vel");
-            RCLCPP_INFO(this->get_logger(), "Diff mode ready at pulses front=%d rear=%d",
-                        current_steer_pulse_front_, current_steer_pulse_rear_);
-        } else {
-            drive_mode_ = DriveMode::NORMAL;
-            cmd_vx_ = 0.0;
-            cmd_wz_ = 0.0;
+        last_cmd_time_ = this->now();
+        if (mode_ == Mode::ACKERMANN) {
+            // Nav2 가 같은 제한각 명령을 계속 보내 재차 걸리지 않도록 중립 명령을 한 번 요구한다.
             awaiting_neutral_command_ = true;
-            motion_inhibited_ = true;
-            last_cmd_time_ = this->now();
-            publish_drive_mode_status("Normal 4WS steering centered; waiting for neutral cmd_vel");
-            RCLCPP_INFO(this->get_logger(), "Normal mode restored; waiting for neutral cmd_vel");
+            publish_mode_status("Ackermann 4WS ready; waiting for neutral cmd_vel");
+        } else if (mode_ == Mode::DIFF) {
+            awaiting_neutral_command_ = false;
+            publish_mode_status("Diff steering aligned; cmd_vel linear.x/y=lateral, angular.z=spin");
+        } else {
+            awaiting_neutral_command_ = false;
+            publish_mode_status("Steering centered; drive disabled");
         }
+        RCLCPP_INFO(this->get_logger(), "Mode %s active (steer F/R=%.1f/%.1f deg)",
+                    mode_name(mode_), current_steer_angle_front_ * RAD2DEG,
+                    current_steer_angle_rear_ * RAD2DEG);
         return true;
     }
 
-    // 조향을 diff 각도로 고정한 채 차동구동처럼 움직인다.
-    //   바퀴 i (x_i = ±L/2) 의 접선 속도 = vx·cosδ_i + (vy + wz·x_i)·sinδ_i,  vx = 0
-    // 오도메트리 compute_body_velocity() 의 정확한 역이라 명령과 측정이 같은 모델을 쓴다.
-    void control_diff_mode()
+    // --- 모드별 제어 ---
+    void control_align_mode()
     {
-        const int32_t target_front = diff_target_pulse_front();
-        const int32_t target_rear = diff_target_pulse_rear();
+        stop_drive_motors();
+        steer_cmd_deg_front_ = steer_cmd_deg_rear_ = 0.0;
+        if (!both_steering_status_fresh() || steering_fault_active())
+            return;
+        handle_steer_toggle(ID_FRONT_STEER, 0, last_pulse_front_, toggle_front_,
+                            setpoint_retry_front_, setpoint_feedback_front_,
+                            current_steer_pulse_front_);
+        handle_steer_toggle(ID_REAR_STEER, 0, last_pulse_rear_, toggle_rear_,
+                            setpoint_retry_rear_, setpoint_feedback_rear_,
+                            current_steer_pulse_rear_);
+    }
+
+    // 조향을 diff 각도로 고정한 채 차동구동처럼 움직인다.
+    //   바퀴 i (x_i = ±L/2) 의 접선 속도 = (v_lat + wz·x_i) / sin(δ_i)
+    // compute_body_velocity() 의 정확한 역이라, odom 이 되돌리는 vy/wz 가 지령과 일치한다.
+    void control_diff_mode(bool cmd_timeout)
+    {
+        const double f_deg = diff_front_deg();
+        const double r_deg = diff_rear_deg();
+        steer_cmd_deg_front_ = f_deg;
+        steer_cmd_deg_rear_ = r_deg;
+        const int32_t target_front = deg_to_steer_pulse(f_deg);
+        const int32_t target_rear = deg_to_steer_pulse(r_deg);
         handle_steer_toggle(ID_FRONT_STEER, target_front, last_pulse_front_, toggle_front_,
                             setpoint_retry_front_, setpoint_feedback_front_,
                             current_steer_pulse_front_);
@@ -1425,71 +1506,63 @@ class MotorNode : public rclcpp::Node
                                  "Diff drive inhibited: steering left diff position");
             return;
         }
-
-        if ((this->now() - last_diff_cmd_time_).seconds() > DIFF_COMMAND_TIMEOUT_MS / 1000.0) {
+        if (cmd_timeout) {
             stop_drive_motors();
             return;
         }
 
-        double safe_vy =
-            std::clamp(diff_cmd_vy_, -diff_max_lateral_speed_, diff_max_lateral_speed_);
-        double safe_wz =
-            std::clamp(diff_cmd_wz_, -diff_max_angular_speed_, diff_max_angular_speed_);
-        if (std::abs(safe_vy) < 0.001)
-            safe_vy = 0.0;
-        if (std::abs(safe_wz) < 0.001)
-            safe_wz = 0.0;
-        if (safe_vy == 0.0 && safe_wz == 0.0) {
+        // 디프 전용 속도 제한. 0 이면 전역 제한을 쓴다.
+        const double lin_lim = diff_max_linear_vel_ > 0.0
+                                   ? std::min(diff_max_linear_vel_, max_linear_vel_)
+                                   : max_linear_vel_;
+        const double ang_lim = diff_max_angular_vel_ > 0.0
+                                   ? std::min(diff_max_angular_vel_, max_angular_vel_)
+                                   : max_angular_vel_;
+        double v_lat = std::clamp((diff_lateral_ ? cmd_vx_ : 0.0) + cmd_vy_, -lin_lim, lin_lim);
+        double wz = std::clamp(cmd_wz_, -ang_lim, ang_lim);
+        if (std::abs(v_lat) < 0.001)
+            v_lat = 0.0;
+        if (std::abs(wz) < 0.001)
+            wz = 0.0;
+        if (v_lat == 0.0 && wz == 0.0) {
             stop_drive_motors();
             return;
         }
 
-        // 실제 조향각(측정값)으로 투영해서, 90 도가 아니어도 명령이 정확하다.
+        // 실제 조향각(측정값)으로 나눠서, 90 도가 아니어도 명령이 정확하다.
         const double sf = std::sin(current_steer_angle_front_);
         const double sr = std::sin(current_steer_angle_rear_);
-        const double front_speed = (safe_vy + safe_wz * WHEELBASE * 0.5) * sf;
-        const double rear_speed = (safe_vy - safe_wz * WHEELBASE * 0.5) * sr;
-        const double target_rpm_front = (front_speed / WHEEL_CIRCUM) * 60.0 * DRIVE_RATIO;
-        const double target_rpm_rear = (rear_speed / WHEEL_CIRCUM) * 60.0 * DRIVE_RATIO;
-        const int32_t velocity_pulse_front =
-            static_cast<int32_t>((target_rpm_front / 60.0) * ENCODER_PPR);
-        const int32_t velocity_pulse_rear =
-            static_cast<int32_t>((target_rpm_rear / 60.0) * ENCODER_PPR);
+        if (std::abs(sf) < 0.1 || std::abs(sr) < 0.1) {
+            stop_drive_motors();
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Diff steering angle (%.1f/%.1f deg) too close to 0; cannot move",
+                                 current_steer_angle_front_ * RAD2DEG,
+                                 current_steer_angle_rear_ * RAD2DEG);
+            return;
+        }
+        const double half = wz * WHEELBASE * 0.5;
+        const double front_speed =
+            std::clamp((v_lat + half) / sf, -max_linear_vel_, max_linear_vel_);
+        const double rear_speed =
+            std::clamp((v_lat - half) / sr, -max_linear_vel_, max_linear_vel_);
 
-        send_drive_pdo(ID_FRONT_DRIVE, velocity_pulse_front, 0x000F);
-        send_drive_pdo(ID_REAR_DRIVE, velocity_pulse_rear, 0x000F);
+        send_drive_pdo(ID_FRONT_DRIVE, wheel_mps_to_pulse(front_speed), 0x000F);
+        send_drive_pdo(ID_REAR_DRIVE, wheel_mps_to_pulse(rear_speed), 0x000F);
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                             "Diff cmd lateral=%.3f yaw=%.3f wheel(F/R)=%.3f/%.3f m/s", safe_vy,
-                             safe_wz, front_speed, rear_speed);
+                             "Diff cmd lateral=%.3f yaw=%.3f wheel(F/R)=%.3f/%.3f m/s", v_lat,
+                             wz, front_speed, rear_speed);
     }
 
-    // --- 제어 루프 ---
-    void control_loop()
+    static int32_t wheel_mps_to_pulse(double mps)
     {
-        read_can_messages();
-        update_odometry(); // 모드/복구/정지와 무관하게 실제 바퀴 피드백을 계속 적분한다
+        const double rpm = (mps / WHEEL_CIRCUM) * 60.0 * DRIVE_RATIO;
+        return static_cast<int32_t>(std::lround((rpm / 60.0) * ENCODER_PPR));
+    }
 
-        if (drive_mode_ != DriveMode::NORMAL && drive_mode_ != DriveMode::FAILED &&
-            (steering_fault_active() || drive_fault_active())) {
-            fail_drive_mode("Motor fault detected during diff mode operation");
-        }
-
-        if (process_steering_recovery()) {
-            return;
-        }
-
-        if (process_drive_mode_transition())
-            return;
-        if (drive_mode_ == DriveMode::DIFF) {
-            control_diff_mode();
-            return;
-        }
-        if (drive_mode_ == DriveMode::FAILED) {
-            stop_drive_motors();
-            return;
-        }
-
-        if ((this->now() - last_cmd_time_).seconds() > 0.5) {
+    // 4WS 역위상 조향 (rbio 제어 루프)
+    void control_ackermann_mode(bool cmd_timeout)
+    {
+        if (cmd_timeout) {
             stop_drive_motors();
             hold_current_steering_position();
             return;
@@ -1497,8 +1570,8 @@ class MotorNode : public rclcpp::Node
 
         const double L = WHEELBASE;
 
-        double safe_vx = std::clamp(cmd_vx_, -max_linear_speed_, max_linear_speed_);
-        double safe_wz = std::clamp(cmd_wz_, -max_angular_speed_, max_angular_speed_);
+        double safe_vx = std::clamp(cmd_vx_, -max_linear_vel_, max_linear_vel_);
+        double safe_wz = std::clamp(cmd_wz_, -max_angular_vel_, max_angular_vel_);
 
         // 1. 노이즈 필터링 (0.001 이하는 0으로)
         if (std::abs(safe_vx) < 0.001)
@@ -1558,14 +1631,16 @@ class MotorNode : public rclcpp::Node
         front_rad = std::clamp(front_rad, -max_steering_angle_rad_, max_steering_angle_rad_);
         rear_rad = std::clamp(rear_rad, -max_steering_angle_rad_, max_steering_angle_rad_);
 
-        double front_steer_deg = front_rad * (180.0 / M_PI);
-        double rear_steer_deg = rear_rad * (180.0 / M_PI);
+        double front_steer_deg = front_rad * RAD2DEG;
+        double rear_steer_deg = rear_rad * RAD2DEG;
+        steer_cmd_deg_front_ = front_steer_deg;
+        steer_cmd_deg_rear_ = rear_steer_deg;
 
         double front_error_rad = std::abs(front_rad - current_steer_angle_front_);
         double rear_error_rad = std::abs(rear_rad - current_steer_angle_rear_);
 
-        int32_t pulse_front = (int32_t)(front_steer_deg * (STEER_RATIO * ENCODER_PPR / 360.0));
-        int32_t pulse_rear = (int32_t)(rear_steer_deg * (STEER_RATIO * ENCODER_PPR / 360.0));
+        int32_t pulse_front = deg_to_steer_pulse(front_steer_deg);
+        int32_t pulse_rear = deg_to_steer_pulse(rear_steer_deg);
 
         const double pulses_per_radian = STEER_RATIO * ENCODER_PPR / (2.0 * M_PI);
         const int32_t actual_front_pulse =
@@ -1588,8 +1663,8 @@ class MotorNode : public rclcpp::Node
                 this->get_logger(), *this->get_clock(), 1000,
                 "Waiting for straight steering alignment: target(F/R)=%.1f/%.1f deg "
                 "actual(F/R)=%.1f/%.1f deg",
-                front_steer_deg, rear_steer_deg, current_steer_angle_front_ * 180.0 / M_PI,
-                current_steer_angle_rear_ * 180.0 / M_PI);
+                front_steer_deg, rear_steer_deg, current_steer_angle_front_ * RAD2DEG,
+                current_steer_angle_rear_ * RAD2DEG);
             return;
         }
 
@@ -1605,18 +1680,51 @@ class MotorNode : public rclcpp::Node
                                  "Driving while steering: scale(F/R)=%.2f/%.2f "
                                  "target(F/R)=%.1f/%.1f deg actual(F/R)=%.1f/%.1f deg",
                                  front_alignment_scale, rear_alignment_scale, front_steer_deg,
-                                 rear_steer_deg, current_steer_angle_front_ * 180.0 / M_PI,
-                                 current_steer_angle_rear_ * 180.0 / M_PI);
+                                 rear_steer_deg, current_steer_angle_front_ * RAD2DEG,
+                                 current_steer_angle_rear_ * RAD2DEG);
         }
 
         // 앞/뒤 구동축은 항상 같은 주기에 함께 갱신한다.
-        double target_rpm_front = (front_speed / WHEEL_CIRCUM) * 60.0 * DRIVE_RATIO;
-        double target_rpm_rear = (rear_speed / WHEEL_CIRCUM) * 60.0 * DRIVE_RATIO;
-        int32_t vel_pulse_front = (int32_t)((target_rpm_front / 60.0) * ENCODER_PPR);
-        int32_t vel_pulse_rear = (int32_t)((target_rpm_rear / 60.0) * ENCODER_PPR);
+        send_drive_pdo(ID_FRONT_DRIVE, wheel_mps_to_pulse(front_speed), 0x000F);
+        send_drive_pdo(ID_REAR_DRIVE, wheel_mps_to_pulse(rear_speed), 0x000F);
+    }
 
-        send_drive_pdo(ID_FRONT_DRIVE, vel_pulse_front, 0x000F);
-        send_drive_pdo(ID_REAR_DRIVE, vel_pulse_rear, 0x000F);
+    // --- 제어 루프 ---
+    void control_loop()
+    {
+        read_can_messages();
+        update_odometry(); // 모드/복구/정지와 무관하게 실제 바퀴 피드백을 계속 적분한다
+        publish_steer_angle();
+
+        if (transitioning_ && (steering_fault_active() || drive_fault_active())) {
+            fail_mode("Motor fault detected during mode transition");
+        }
+
+        if (process_steering_recovery()) {
+            return;
+        }
+
+        process_mode_request();
+        if (process_mode_transition())
+            return;
+        if (failed_) {
+            stop_drive_motors();
+            return;
+        }
+
+        const bool cmd_timeout = (this->now() - last_cmd_time_).seconds() > cmd_vel_timeout_s_;
+
+        switch (mode_) {
+        case Mode::ALIGN:
+            control_align_mode();
+            break;
+        case Mode::DIFF:
+            control_diff_mode(cmd_timeout);
+            break;
+        case Mode::ACKERMANN:
+            control_ackermann_mode(cmd_timeout);
+            break;
+        }
     }
 
     void handle_steer_toggle(int id, int32_t target_pulse, int32_t& last_pulse, int& state,
@@ -1702,6 +1810,7 @@ class MotorNode : public rclcpp::Node
                             setpoint_retry_rear_, setpoint_feedback_rear_, actual_rear);
     }
 
+    // --- 콜백 ---
     void cmd_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
     {
         if (pub_command_ack_) {
@@ -1709,21 +1818,13 @@ class MotorNode : public rclcpp::Node
             ack.data = "cmd_vel_received";
             pub_command_ack_->publish(ack);
         }
-
-        if (drive_mode_ != DriveMode::NORMAL) {
-            cmd_vx_ = 0.0;
-            cmd_wz_ = 0.0;
-            last_cmd_time_ = this->now();
-            return;
-        }
+        last_cmd_time_ = this->now();
 
         if (awaiting_neutral_command_) {
-            const bool neutral =
-                std::abs(msg->linear.x) < 0.001 && std::abs(msg->angular.z) < 0.001;
-            cmd_vx_ = 0.0;
-            cmd_wz_ = 0.0;
-            last_cmd_time_ = this->now();
-
+            const bool neutral = std::abs(msg->linear.x) < 0.001 &&
+                                 std::abs(msg->linear.y) < 0.001 &&
+                                 std::abs(msg->angular.z) < 0.001;
+            cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
             if (neutral) {
                 awaiting_neutral_command_ = false;
                 motion_inhibited_ = false;
@@ -1734,24 +1835,53 @@ class MotorNode : public rclcpp::Node
         }
 
         cmd_vx_ = msg->linear.x;
+        cmd_vy_ = msg->linear.y;
         cmd_wz_ = msg->angular.z;
-        last_cmd_time_ = this->now();
     }
 
-    void diff_cmd_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
+    void initialize_cb(const std_srvs::srv::Trigger::Request::SharedPtr,
+                       std_srvs::srv::Trigger::Response::SharedPtr response)
     {
-        if (drive_mode_ != DriveMode::DIFF) {
-            diff_cmd_vy_ = 0.0;
-            diff_cmd_wz_ = 0.0;
+        if (initialization_in_progress_ || steering_recovery_requested_) {
+            response->success = false;
+            response->message = "Motor initialization is already running";
             return;
         }
-        if (std::abs(msg->linear.x) > 0.001) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                 "diff/cmd_vel linear.x is ignored in diff mode (use linear.y)");
+        if (can_sock_ < 0) {
+            response->success = false;
+            response->message = "CAN socket is unavailable";
+            return;
         }
-        diff_cmd_vy_ = msg->linear.y;
-        diff_cmd_wz_ = msg->angular.z;
-        last_diff_cmd_time_ = this->now();
+        if (drive_fault_active()) {
+            response->success = false;
+            response->message = "Drive motor fault must be serviced before initialization";
+            return;
+        }
+
+        if (recovery_state_ == SteeringRecoveryState::FAILED) {
+            recovery_state_ = SteeringRecoveryState::IDLE;
+        }
+        stop_drive_motors();
+        steering_recovery_requested_ = true;
+        initialization_complete_ = false;
+        motion_inhibited_ = true;
+        awaiting_neutral_command_ = false;
+        transitioning_ = false;
+        failed_ = false;
+        mode_ = Mode::ALIGN;
+        target_mode_ = Mode::ALIGN;
+        set_initialization_status("INITIALIZING", "Lower motor initialization requested", false);
+        response->success = true;
+        response->message = "Lower motor initialization accepted";
+    }
+
+    void reset_odom_cb(const std_srvs::srv::Trigger::Request::SharedPtr,
+                       std_srvs::srv::Trigger::Response::SharedPtr response)
+    {
+        x_ = y_ = th_ = 0.0;
+        response->success = true;
+        response->message = "Odometry reset to origin";
+        RCLCPP_INFO(this->get_logger(), "Odometry reset to origin");
     }
 };
 

@@ -168,7 +168,7 @@ cat ~/hw/src/motor_node/script/can_guide.txt              # can0 설정
 | 플래너 | `SmacPlannerHybrid`, DUBIN, `minimum_turning_radius` 1.30 | 조향식 차량. 2D 플래너는 회전반경 없는 경로를 내서 못 쓴다 |
 | 컨트롤러 | `MPPIController`, `motion_model: Ackermann`, `min_turning_r` 1.30 | 롤아웃 비용으로 동적 장애물을 직접 회피. RPP 는 회피를 못 한다 |
 | 장애물 입력 | `/livox_merge/merged_pointcloud_sliced` -> local/global `obstacle_layer` | 지면 위 0.15~2.3 m 슬라이스 + 차체 XY 크롭(`slice_crop_half_*`) |
-| 속도 한계 | vx 0.20, wz 0.30 (MPPI, velocity_smoother, behavior_server) | motor_node 의 `max_linear/angular_speed` 와 동일해야 한다 |
+| 속도 한계 | vx 0.20, wz 0.30 (MPPI, velocity_smoother, behavior_server) | motor_node 의 `max_linear_vel` / `max_angular_vel` 와 동일해야 한다 |
 
 `cmd_vel` 의 (v, ω) 는 차량 중심(base_link) 속도이고 조향각 변환은 motor_node
 가 한다. 실제 최소회전반경은 (축간 1.29/2)/tan55° ≈ 0.45 m 라 1.30 은 보수값이다.
