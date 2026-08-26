@@ -38,7 +38,11 @@ class TransformFusionNode(Node):
         self.create_subscription(Odometry, '/map_to_odom', self.cb_save_map_to_odom, 1)
 
         # 퍼블리셔, 브로드캐스터
-        self.pub_localization = self.create_publisher(Odometry, '/localization', 1)
+        # map -> body (3D, 라이다 IMU 프레임). 2D 평면 자세 /localization (map -> base_footprint)
+        # 은 tf_2d.py 가 낸다. 이름이 겹치지 않도록 여기서는 /localization_3d 로 낸다.
+        self.declare_parameter('localization_topic', '/localization_3d')
+        self.pub_localization = self.create_publisher(
+            Odometry, self.get_parameter('localization_topic').value, 1)
         self.tf_broadcaster    = tf2_ros.TransformBroadcaster(self)
 
         # 주기 타이머

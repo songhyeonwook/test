@@ -38,6 +38,10 @@ class Tf2DBridge(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_topic', '/Odometry')
         self.declare_parameter('map_to_odom_topic', '/map_to_odom')
+        # map -> base_footprint 평면 자세를 Odometry 로도 낸다 (rbio 앱이 /localization 을
+        # frame map / child base_footprint 로 요구). '' 이면 안 낸다.
+        self.declare_parameter('localization_topic', '/localization')
+        self.declare_parameter('footprint_frame', 'base_footprint')
         # body(IMU) 에서 본 차량 정렬 기준점.
         # 기본값 0 은 자리표시자다. 반드시 mid360.yaml 에서 받아야 한다.
         self.declare_parameter('ref_from_body_xyz', [0.0, 0.0, 0.0])
@@ -49,6 +53,8 @@ class Tf2DBridge(Node):
         self.base_frame = self.get_parameter('base_frame').value
         odom_topic = self.get_parameter('odom_topic').value
         map_to_odom_topic = self.get_parameter('map_to_odom_topic').value
+        localization_topic = self.get_parameter('localization_topic').value
+        self.footprint_frame = self.get_parameter('footprint_frame').value
         xyz = self.get_parameter('ref_from_body_xyz').value
         rpy = self.get_parameter('ref_from_body_rpy').value
         keepalive_hz = float(self.get_parameter('keepalive_rate_hz').value)
@@ -65,6 +71,9 @@ class Tf2DBridge(Node):
         self.last_odom_base = None   # (M, q) 마지막으로 계산한 odom->base_link
 
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self.pub_localization = (
+            self.create_publisher(Odometry, localization_topic, 10)
+            if localization_topic else None)
 
         self.create_subscription(Odometry, odom_topic, self.cb_odometry, 10)
         self.create_subscription(
@@ -177,6 +186,25 @@ class Tf2DBridge(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
+    def publish_localization(self, M_map_base, stamp):
+        """map -> base_footprint 평면 자세. base_link 와 xy/yaw 는 같고 z=0."""
+        if self.pub_localization is None:
+            return
+        yaw = self.yaw_from_matrix(M_map_base)
+        q = self.quat_from_yaw(yaw)
+        msg = Odometry()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self.map_frame
+        msg.child_frame_id = self.footprint_frame
+        msg.pose.pose.position.x = float(M_map_base[0, 3])
+        msg.pose.pose.position.y = float(M_map_base[1, 3])
+        msg.pose.pose.position.z = 0.0
+        msg.pose.pose.orientation.x = float(q[0])
+        msg.pose.pose.orientation.y = float(q[1])
+        msg.pose.pose.orientation.z = float(q[2])
+        msg.pose.pose.orientation.w = float(q[3])
+        self.pub_localization.publish(msg)
+
     def publish_chain(self, stamp):
         M_mo, q_mo = self.last_map_odom
         M_ob, q_ob = self.last_odom_base
@@ -204,6 +232,7 @@ class Tf2DBridge(Node):
 
         # 센서 데이터와 시간축이 맞도록 오도메트리 stamp 그대로 낸다.
         self.publish_chain(msg.header.stamp)
+        self.publish_localization(M_map_base, msg.header.stamp)
 
     def on_keepalive(self):
         # 라이다 주기 사이를 메꾼다. odom 정지 가정으로 최신값을 재발행.

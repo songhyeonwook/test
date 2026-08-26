@@ -11,6 +11,10 @@ HW_WS="${HW_WS:-$HOME/hw}"
 # --- nav 워크스페이스 = hw ---
 export TRANSFER_ROBOT_NAV_WORKSPACE="${HW_WS}"
 export TRANSFER_ROBOT_NAV_LAUNCH="${HW_WS}/src/bringup/launch/bringup.launch.py"
+# bringup.launch.py 의 app 인자 기본값. rbio 스크립트는 launch 인자를 못 넘기므로 env 로 켠다.
+#   - Nav2 는 /cmd_vel_nav 까지만 내고 앱이 /cmd_vel 로 중계
+#   - motor_node 는 센터링 뒤 자동 애커만(AUTONOMOUS), 도킹 속도 0.04/0.05
+export HW_APP_MODE=true
 
 # --- ROS 도메인 (rbio 앱/스크립트와 같은 30 번) ---
 export TRANSFER_ROBOT_ROS_DOMAIN_ID=30

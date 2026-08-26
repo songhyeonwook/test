@@ -19,7 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration, PythonExpression, PythonExpression
 from launch_ros.actions import LoadComposableNodes
 from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
@@ -60,6 +60,16 @@ def generate_launch_description():
     remappings = [('/tf', 'tf'),
                   ('/tf_static', 'tf_static')]
 
+    # app:=true  -> rbio TransferRobot 앱이 /cmd_vel_nav 를 받아 상한 클램프 후 /cmd_vel 로
+    #               중계한다. Nav2 는 /cmd_vel 을 직접 내면 안 된다 (발행자 둘).
+    #               controller -> cmd_vel_nav_raw -> velocity_smoother -> /cmd_vel_nav
+    # app:=false -> controller -> cmd_vel_nav -> velocity_smoother -> /cmd_vel (기본, 단독 주행)
+    app = LaunchConfiguration('app')
+    controller_cmd_vel = PythonExpression(
+        ["'cmd_vel_nav_raw' if '", app, "' == 'true' else 'cmd_vel_nav'"])
+    smoother_cmd_vel_out = PythonExpression(
+        ["'cmd_vel_nav' if '", app, "' == 'true' else 'cmd_vel'"])
+
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
         'use_sim_time': use_sim_time,
@@ -82,6 +92,10 @@ def generate_launch_description():
         'namespace',
         default_value='',
         description='Top-level namespace')
+
+    declare_app_cmd = DeclareLaunchArgument(
+        'app', default_value='false',
+        description='true: rbio 앱이 /cmd_vel_nav -> /cmd_vel 중계. Nav2 는 /cmd_vel 을 내지 않는다')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time',
@@ -124,7 +138,7 @@ def generate_launch_description():
                 respawn_delay=2.0,
                 parameters=[configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
-                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
+                remappings=remappings + [('cmd_vel', controller_cmd_vel)]),
             Node(
                 package='nav2_smoother',
                 executable='smoother_server',
@@ -185,7 +199,7 @@ def generate_launch_description():
                 parameters=[configured_params],
                 arguments=['--ros-args', '--log-level', log_level],
                 remappings=remappings +
-                        [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
+                        [('cmd_vel', controller_cmd_vel), ('cmd_vel_smoothed', smoother_cmd_vel_out)]),
             Node(
                 package='nav2_lifecycle_manager',
                 executable='lifecycle_manager',
@@ -207,7 +221,7 @@ def generate_launch_description():
                 plugin='nav2_controller::ControllerServer',
                 name='controller_server',
                 parameters=[configured_params],
-                remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
+                remappings=remappings + [('cmd_vel', controller_cmd_vel)]),
             ComposableNode(
                 package='nav2_smoother',
                 plugin='nav2_smoother::SmootherServer',
@@ -244,7 +258,7 @@ def generate_launch_description():
                 name='velocity_smoother',
                 parameters=[configured_params],
                 remappings=remappings +
-                           [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
+                           [('cmd_vel', controller_cmd_vel), ('cmd_vel_smoothed', smoother_cmd_vel_out)]),
             ComposableNode(
                 package='nav2_lifecycle_manager',
                 plugin='nav2_lifecycle_manager::LifecycleManager',
@@ -263,6 +277,7 @@ def generate_launch_description():
 
     # Declare the launch options
     ld.add_action(declare_namespace_cmd)
+    ld.add_action(declare_app_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)

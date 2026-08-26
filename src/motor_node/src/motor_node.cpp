@@ -15,9 +15,17 @@
 //   motor_node/diagnostics         diagnostic_msgs/DiagnosticArray (latched)
 //   motor_node/initialization_status  std_msgs/String  latched, "STATE|detail"
 //   motor_node/drive_mode          std_msgs/String  latched, "MODE|detail"
+//   docking/cmd_vel                geometry_msgs/Twist  (rbio 앱 호환) DIFF 모드 전용
+//                                    linear.x = 횡이동(rbio 부호: + 우측), angular.z = 회전
 // 서비스
 //   motor_node/initialize          std_srvs/Trigger  4축 재초기화 + 조향 센터링
 //   motor_node/reset_odom          std_srvs/Trigger  오도메트리 원점 리셋
+//   motor_node/set_docking_mode    std_srvs/SetBool  (rbio 앱 호환) true=DIFF, false=ACKERMANN
+//
+// motor_node/drive_mode 의 상태 토큰은 rbio 앱이 아는 이름으로 낸다:
+//   ACKERMANN -> AUTONOMOUS, DIFF -> DOCKING, 전환 중 -> ENTERING_DOCKING / EXITING_DOCKING,
+//   ALIGN -> ALIGN (앱은 준비 안 됨으로 봄), 실패 -> FAILED. 상세에 hw 모드명을 같이 적는다.
+// startup_mode (0/1/2) 를 주면 시동 센터링 뒤 자동으로 그 모드로 들어간다 (앱 모드: 1).
 //
 // 모드 전환: 주행이 완전히 멈춘 뒤 조향을 목표 각도(정렬/애커만=0도, 디프=diff_steer_deg)
 //   로 돌리고, 도달하면 모드가 활성화된다. 디프 모드는 cmd_vel 의 linear.x(또는 y) 를
@@ -66,6 +74,7 @@
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -134,6 +143,9 @@ class MotorNode : public rclcpp::Node
             "mode", 10, std::bind(&MotorNode::mode_cb, this, std::placeholders::_1));
         sub_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "cmd_vel", 10, std::bind(&MotorNode::cmd_vel_cb, this, std::placeholders::_1));
+        sub_docking_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
+            "docking/cmd_vel", 10,
+            std::bind(&MotorNode::docking_cmd_vel_cb, this, std::placeholders::_1));
         pub_command_ack_ =
             this->create_publisher<std_msgs::msg::String>("motor_node/command_ack", 10);
         pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
@@ -157,6 +169,9 @@ class MotorNode : public rclcpp::Node
         srv_reset_odom_ = this->create_service<std_srvs::srv::Trigger>(
             "motor_node/reset_odom", std::bind(&MotorNode::reset_odom_cb, this,
                                                std::placeholders::_1, std::placeholders::_2));
+        srv_set_docking_mode_ = this->create_service<std_srvs::srv::SetBool>(
+            "motor_node/set_docking_mode", std::bind(&MotorNode::set_docking_mode_cb, this,
+                                                     std::placeholders::_1, std::placeholders::_2));
 
         last_cmd_time_ = this->now();
         last_odom_time_ = this->now();
@@ -196,6 +211,9 @@ class MotorNode : public rclcpp::Node
         diff_max_angular_vel_ =
             std::max(0.0, this->declare_parameter<double>("diff_max_angular_vel", 0.0));
         diff_lateral_ = this->declare_parameter<bool>("diff_linear_x_is_lateral", true);
+        // 시동 센터링 뒤 자동 진입할 모드. 0 = /mode 를 기다린다 (단독 테스트), 1 = 애커만 (rbio 앱 모드)
+        startup_mode_ =
+            std::clamp(static_cast<int>(this->declare_parameter<int>("startup_mode", 0)), 0, 2);
 
         // --- 오도메트리 (lowcon 파라미터명) ---
         odom_frame_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
@@ -362,6 +380,7 @@ class MotorNode : public rclcpp::Node
     double diff_max_linear_vel_ = 0.0;
     double diff_max_angular_vel_ = 0.0;
     bool diff_lateral_ = true;
+    int startup_mode_ = 0;
 
     std::string odom_frame_ = "odom";
     std::string base_frame_ = "base_link";
@@ -387,6 +406,7 @@ class MotorNode : public rclcpp::Node
 
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_mode_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_docking_cmd_vel_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_command_ack_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr pub_steer_;
@@ -395,6 +415,7 @@ class MotorNode : public rclcpp::Node
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_drive_mode_status_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_initialize_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_odom_;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_set_docking_mode_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr diagnostics_timer_;
@@ -577,17 +598,90 @@ class MotorNode : public rclcpp::Node
         return "ALIGN";
     }
 
+    // rbio 앱이 인식하는 상태 토큰. 상세 문자열 앞에 hw 모드명을 덧붙인다.
+    std::string app_mode_token() const
+    {
+        if (failed_)
+            return "FAILED";
+        if (transitioning_)
+            return target_mode_ == Mode::DIFF ? "ENTERING_DOCKING" : "EXITING_DOCKING";
+        switch (mode_) {
+        case Mode::ACKERMANN:
+            return "AUTONOMOUS";
+        case Mode::DIFF:
+            return "DOCKING";
+        case Mode::ALIGN:
+            return "ALIGN";
+        }
+        return "ALIGN";
+    }
+
+    std::string hw_mode_label() const
+    {
+        if (transitioning_)
+            return std::string("TO_") + mode_name(target_mode_);
+        return mode_name(mode_);
+    }
+
     void publish_mode_status(const std::string& detail)
     {
         if (!pub_drive_mode_status_)
             return;
         std_msgs::msg::String status;
-        std::string name = failed_ ? "FAILED"
-                           : transitioning_
-                               ? std::string("TO_") + mode_name(target_mode_)
-                               : mode_name(mode_);
-        status.data = name + "|" + detail;
+        status.data = app_mode_token() + "|[" + hw_mode_label() + "] " + detail;
         pub_drive_mode_status_->publish(status);
+    }
+
+    // rbio 앱 호환: true = 도킹(DIFF) 진입, false = 자율주행(ACKERMANN) 복귀
+    void set_docking_mode_cb(const std_srvs::srv::SetBool::Request::SharedPtr request,
+                             std_srvs::srv::SetBool::Response::SharedPtr response)
+    {
+        if (can_sock_ < 0) {
+            response->success = false;
+            response->message = "CAN socket is unavailable";
+            return;
+        }
+        if (initialization_in_progress_ || steering_recovery_requested_) {
+            response->success = false;
+            response->message = "Lower motor initialization is running";
+            return;
+        }
+        if (!initialization_complete_ || !all_motors_operational()) {
+            response->success = false;
+            response->message = "All four lower motors must be operational";
+            return;
+        }
+        if (failed_) {
+            response->success = false;
+            response->message = "Drive mode is FAILED; call motor_node/initialize first";
+            return;
+        }
+        if (request->data) {
+            if (mode_ == Mode::DIFF || (transitioning_ && target_mode_ == Mode::DIFF)) {
+                response->success = true;
+                response->message = "Docking mode is already active or entering";
+                return;
+            }
+            requested_mode_ = Mode::DIFF;
+            mode_request_pending_ = true;
+            response->success = true;
+            response->message = "Docking mode transition accepted";
+            return;
+        }
+        if (mode_ == Mode::ACKERMANN || (transitioning_ && target_mode_ == Mode::ACKERMANN)) {
+            response->success = true;
+            response->message = "Autonomous mode is already active or returning";
+            return;
+        }
+        if (steering_fault_active() || drive_fault_active()) {
+            response->success = false;
+            response->message = "Motor fault must be cleared before leaving docking mode";
+            return;
+        }
+        requested_mode_ = Mode::ACKERMANN;
+        mode_request_pending_ = true;
+        response->success = true;
+        response->message = "Autonomous mode transition accepted";
     }
 
     bool drive_is_stopped() const
@@ -1299,7 +1393,14 @@ class MotorNode : public rclcpp::Node
                 recovery_was_requested_ = false;
                 set_initialization_status(
                     "READY", "All four lower motors operational; steering centered", true);
-                publish_mode_status("Steering centered; waiting for /mode (1=ackermann, 2=diff)");
+                if (startup_mode_ != 0 && !mode_request_pending_) {
+                    requested_mode_ = static_cast<Mode>(startup_mode_);
+                    mode_request_pending_ = true;
+                    publish_mode_status(std::string("Steering centered; entering startup mode ") +
+                                        mode_name(requested_mode_));
+                } else {
+                    publish_mode_status("Steering centered; waiting for /mode (1=ackermann, 2=diff)");
+                }
                 RCLCPP_INFO(this->get_logger(),
                             "Steering centered: IDs 2 and 4 are at zero. mode 0 (ALIGN); "
                             "send /mode 1 or 2 to drive.");
@@ -1837,6 +1938,19 @@ class MotorNode : public rclcpp::Node
         cmd_vx_ = msg->linear.x;
         cmd_vy_ = msg->linear.y;
         cmd_wz_ = msg->angular.z;
+    }
+
+    // rbio 앱 호환. DIFF(DOCKING) 모드에서만 유효. rbio 도킹 모드의
+    //   front = -vx + wz*L/2, rear = -vx - wz*L/2  (조향 ~90 도, sin > 0)
+    // 와 같은 바퀴 속도가 나오도록 linear.x 를 횡속도 -x 로 해석한다.
+    void docking_cmd_vel_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
+    {
+        if (mode_ != Mode::DIFF)
+            return;
+        cmd_vx_ = 0.0;
+        cmd_vy_ = -msg->linear.x;
+        cmd_wz_ = msg->angular.z;
+        last_cmd_time_ = this->now();
     }
 
     void initialize_cb(const std_srvs::srv::Trigger::Request::SharedPtr,

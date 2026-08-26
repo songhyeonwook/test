@@ -185,9 +185,30 @@ rbio 의 `manage_motor_node.sh` 는 rbio 쪽 `install/motor_node` 가 없으면 
 넘어가므로 **rbio 의 motor 는 빌드하지 않는다** (`build_transfer_robot.sh motor` 금지).
 둘 다 뜨면 CAN 을 두 노드가 동시에 잡는다.
 
-rbio UI 앱까지 붙일 때는 `tools/rbio_env.sh` 의 `TRANSFER_ROBOT_LIDAR_*` 값이 앱의
-장애물/도킹 인식 좌표를 hw extrinsic 에 맞춘다. 앱이 기대하는 모터 서비스
-(`set_docking_mode`, `docking/cmd_vel`)는 아직 hw motor_node 에 없다.
+### rbio UI 앱까지 붙일 때 (app 모드)
+
+앱은 경로계획을 하지 않는다. `/navigate_to_pose` 로 목표를 넣고, Nav2 가 내는
+**`/cmd_vel_nav` 를 받아 상한(0.18 m/s, 0.16 rad/s) 클램프 후 `/cmd_vel` 로 중계**하며
+300 ms 워치독으로 0 을 낸다. 그래서 앱과 같이 돌릴 때 Nav2 는 `/cmd_vel` 을 직접 내면 안 된다.
+`bringup.launch.py app:=true` (rbio 스크립트 경유 시 `tools/rbio_env.sh` 의 `HW_APP_MODE=true`)
+가 아래를 한 번에 바꾼다. 단독 테스트(`app:=false`, 기본)는 영향이 없다.
+
+| 항목 | app:=false (단독) | app:=true (앱) |
+|---|---|---|
+| Nav2 속도 출력 | controller → `cmd_vel_nav` → smoother → **`/cmd_vel`** | controller → `cmd_vel_nav_raw` → smoother → **`/cmd_vel_nav`** → 앱 → `/cmd_vel` |
+| motor_node 시동 후 | mode 0(정렬)에서 `/mode` 대기 | 센터링 뒤 자동 애커만 (`startup_mode 1`) |
+| 도킹 속도 상한 | 전역값 | 0.04 m/s / 0.05 rad/s (rbio 도킹값) |
+
+앱 호환 인터페이스는 항상 켜져 있다 (단독 테스트에 무해):
+* `motor_node/drive_mode` 상태 토큰은 앱이 아는 이름 — `AUTONOMOUS`(애커만), `DOCKING`(디프),
+  `ENTERING_DOCKING`/`EXITING_DOCKING`(전환 중), `ALIGN`(정렬 대기 = 앱은 준비 안 됨), `FAILED`.
+  상세에 `[ACKERMANN]` 처럼 hw 모드명이 붙는다.
+* `motor_node/set_docking_mode`(SetBool): true → 디프, false → 애커만. `/mode` 와 같은 상태머신.
+* `docking/cmd_vel`: 디프 모드 전용, rbio 부호(`linear.x` + = 우측 횡이동 → 내부 `v_lat = -x`).
+* `/localization`: `tf_2d.py` 가 map → **base_footprint** 평면 자세로 낸다 (앱이 이 프레임을
+  검사). transform_fusion 의 3D(map → body) 출력은 `/localization_3d` 로 옮겼다.
+* behavior_server 에 `backup`, `drive_on_heading` 추가 (앱이 도킹 접근·후퇴에 직접 호출).
+* `tools/rbio_env.sh` 의 `TRANSFER_ROBOT_LIDAR_*` 가 앱의 장애물/도킹 인식 좌표를 hw extrinsic 에 맞춘다.
 
 ## 빌드
 
@@ -284,8 +305,9 @@ vx = (v_f cosδf + v_r cosδr)/2,  vy = (v_f sinδf + v_r sinδr)/2,  wz = (v_f 
 
 토픽/서비스: `/mode`, `/cmd_vel`, `/odom`, `/steer_angle_deg`[전실제,후실제,전지령,후지령],
 `motor_node/{command_ack, diagnostics, initialization_status, drive_mode}`,
-`motor_node/initialize`(재초기화·센터링), `motor_node/reset_odom`. 파라미터는
-`src/motor_node/launch/motor.launch.py`.
+`motor_node/initialize`(재초기화·센터링), `motor_node/reset_odom`,
+rbio 앱 호환 `motor_node/set_docking_mode`, `docking/cmd_vel`. 파라미터는
+`src/motor_node/launch/motor.launch.py` (`startup_mode` 는 app 모드에서 1).
 
 ## Nav2 구성
 

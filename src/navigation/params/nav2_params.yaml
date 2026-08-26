@@ -419,9 +419,16 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["wait"]
+    # BT 는 wait 만 쓴다. backup / drive_on_heading 은 rbio 앱이 도킹 접근·후퇴에
+    # 액션 클라이언트로 직접 호출한다 (/backup, /drive_on_heading). 회전형 spin 은
+    # 조향식 차량에서 불가능하므로 넣지 않는다.
+    behavior_plugins: ["wait", "backup", "drive_on_heading"]
     wait:
       plugin: "nav2_behaviors/Wait"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.1
