@@ -19,7 +19,7 @@
         runtime_pos_log_enable: false
         # 3D prior map 경로는 여기 두지 않는다. localization.launch.py 의
         # map 인자가 navigation/map/<이름>.pcd 로 만들어 이 세 노드
-        # (fast_lio_mapping / global_localization / global_map_publisher) 에
+        # (laser_mapping / global_localization / global_map_publisher) 에
         # 직접 넘긴다. 맵을 바꾸는 곳은 그 인자 하나뿐이다.
         # 주의: /map_save 서비스는 그 경로에 덮어쓴다. 측위 중에는 부르지 말 것.
 

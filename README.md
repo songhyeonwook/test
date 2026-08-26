@@ -144,6 +144,51 @@ host_ip 하나에만 열어서, 서브넷이 3개면 라이다 1대만 붙는다
 rbio 의 `patches/livox-sdk2-multi-nic-detection.patch` 가 적용돼 있다 (host_ip 마다 detection
 소켓을 연다). SDK 를 새로 받아오면 `git apply patches/livox-sdk2-multi-nic-detection.patch` 후 빌드.
 
+## rbio TransferRobot 스크립트로 실차 기동
+
+rbio 저장소(`~/ros/TransferRobot`, 코드 수정 금지)의 sh 는 CAN 서비스·모터·nav 스택을
+systemd 유저 유닛으로 관리한다. 설계상 라이다/측위/Nav2 는 "외부 nav 워크스페이스"가
+띄우게 돼 있고, hw 가 그 역할을 한다. `tools/rbio_env.sh` 가 rbio 스크립트의 기대값
+(`/home/rb/ros2_ws/src/bringup.launch.py`, ROS_DOMAIN_ID 30)을 hw 로 돌린다.
+
+```
+transfer-robot-can.service (system)   can0 up            <- rbio systemd/system
+manage_motor_node.sh                  rbio motor_node    <- 쓰지 않는다 (아래 참고)
+manage_navigation_stack.sh start      hw bringup.launch.py 를 유닛으로 실행
+                                       = 라이다 3대 + livox_merge + FAST-LIO + Nav2 + hw motor_node(/odom)
+```
+
+1. CAN 서비스 설치 (한 번): `~/ros/TransferRobot/scripts/install_motor_autostart.sh`
+   - **비트레이트 확인 필수.** rbio 서비스는 `250000`, hw 의 `script/drive_set.py` 는 `1000000`
+     이다. 실차 드라이버 설정에 맞는 쪽을 쓴다 (`ip -d link show can0` 로 현재값 확인).
+2. hw 빌드 (SDK 설치 포함, 아래 "빌드" 절).
+3. 기동:
+   ```bash
+   source ~/hw/tools/rbio_env.sh
+   ~/ros/TransferRobot/scripts/manage_navigation_stack.sh start    # 45 초 안에 노드 확인
+   ~/ros/TransferRobot/scripts/manage_navigation_stack.sh status
+   ```
+   스크립트는 `/livox_lidar_publisher`, `/laser_mapping`, `/bt_navigator` 와 `/map`,
+   `/navigate_to_pose` 가 보여야 성공으로 본다. 모두 hw 가 낸다.
+4. 확인 (같은 셸에서, ROS_DOMAIN_ID=30):
+   ```bash
+   ros2 topic hz /livox_merge/merged_pointcloud /odom
+   ros2 topic echo /motor_node/initialization_status --once      # READY
+   ros2 topic pub -1 /mode std_msgs/Int32 "{data: 1}"            # 애커만 주행 허용
+   ```
+   RViz 는 hw 의 `bringup.launch.py` 가 `rviz:=true` 로 같이 띄운다.
+5. 정지: `manage_navigation_stack.sh stop`. 로그: `manage_navigation_stack.sh logs`.
+
+모터노드는 rbio 것이 아니라 **hw motor_node** 를 쓴다 (`bringup.launch.py motor:=true` 기본).
+rbio motor_node 는 `/odom` 을 내지 않아 MPPI 속도 피드백이 비고, `/mode` 도 없다.
+rbio 의 `manage_motor_node.sh` 는 rbio 쪽 `install/motor_node` 가 없으면 경고만 내고
+넘어가므로 **rbio 의 motor 는 빌드하지 않는다** (`build_transfer_robot.sh motor` 금지).
+둘 다 뜨면 CAN 을 두 노드가 동시에 잡는다.
+
+rbio UI 앱까지 붙일 때는 `tools/rbio_env.sh` 의 `TRANSFER_ROBOT_LIDAR_*` 값이 앱의
+장애물/도킹 인식 좌표를 hw extrinsic 에 맞춘다. 앱이 기대하는 모터 서비스
+(`set_docking_mode`, `docking/cmd_vel`)는 아직 hw motor_node 에 없다.
+
 ## 빌드
 
 Livox SDK는 colcon이 아니라 시스템에 직접 설치한다 (드라이버가 `/usr/local/lib` 를 하드코딩).

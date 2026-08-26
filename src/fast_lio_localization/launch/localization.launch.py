@@ -82,7 +82,7 @@ def generate_launch_description():
     fast_lio_node = Node(
         package='fast_lio_localization',
         executable='fastlio_mapping',
-        name='fast_lio_mapping',
+        name='laser_mapping',   # rbio manage_navigation_stack.sh 가 이 이름을 기다린다
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
             # launch 의 map 인자가 mid360.yaml 보다 뒤에 와서 덮어쓴다
