@@ -105,15 +105,44 @@ ABI 로 빌드되어 있어 import 가 깨진다. 위처럼 numpy2 호환 버전
 덮어써야 한다. 반드시 `/usr/bin/python3` 로 설치할 것 - conda 쪽에 깔면 ROS 가
 못 찾는다.
 
+## 라이다 네트워크
+
+MID-360 3대는 유선 `enp130s0` 하나에 스위치로 묶여 있고, 드라이버 설정
+(`src/livox_ros_driver2/config/multi_MID360_config.json`)이 호스트 IP 를 라이다마다
+다른 서브넷으로 요구한다. 유선 연결을 DHCP 로 두면 라이다가 붙지 않는다.
+
+| 라이다 | lidar_ip | host_ip |
+|---|---|---|
+| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.2 |
+| livox_front | 192.168.2.102 | 192.168.2.50 |
+| livox_rear | 192.168.3.144 | 192.168.3.50 |
+
+한 번만 설정하면 부팅 시 자동 적용된다:
+
+```bash
+sudo nmcli con mod "Wired connection 1" \
+  ipv4.method manual \
+  ipv4.addresses "192.168.1.2/24,192.168.2.50/24,192.168.3.50/24" \
+  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+sudo nmcli con up "Wired connection 1"
+ip -4 -br addr show enp130s0          # 주소 3개 확인
+for ip in 192.168.1.135 192.168.2.102 192.168.3.144; do ping -c1 -W1 $ip; done
+```
+
+`ipv4.never-default yes` 는 유선이 기본 게이트웨이를 가져가 Wi-Fi 인터넷을 끊는 것을 막는다.
+
 ## 빌드
 
 Livox SDK는 colcon이 아니라 시스템에 직접 설치한다 (드라이버가 `/usr/local/lib` 를 하드코딩).
 
 ```bash
-cd ~/hw/third_party/Livox-SDK2/build
-cmake .. && make -j$(nproc)
-sudo make install && sudo ldconfig
+cd ~/hw/third_party/Livox-SDK2
+cmake -B build && cmake --build build -j$(nproc)
+sudo cmake --install build && sudo ldconfig
 ```
+
+`build/` 는 `.gitignore` 의 `build/` 패턴에 걸려 git 에 들어가지 않는다 (의도된 것).
+새 PC 에서는 위 명령이 `build/` 를 새로 만든다.
 
 그 다음 워크스페이스 전체:
 
@@ -168,12 +197,14 @@ cat ~/hw/src/motor_node/script/can_guide.txt              # can0 설정
 | 플래너 | `SmacPlannerHybrid`, DUBIN, `minimum_turning_radius` 1.30 | 조향식 차량. 2D 플래너는 회전반경 없는 경로를 내서 못 쓴다 |
 | 컨트롤러 | `MPPIController`, `motion_model: Ackermann`, `min_turning_r` 1.30 | 롤아웃 비용으로 동적 장애물을 직접 회피. RPP 는 회피를 못 한다 |
 | 장애물 입력 | `/livox_merge/merged_pointcloud_sliced` -> local/global `obstacle_layer` | 지면 위 0.15~2.3 m 슬라이스 + 차체 XY 크롭(`slice_crop_half_*`) |
+| local costmap | 12x12 m, 10 Hz | 기본 5x5 m 는 범퍼 앞 1.7 m 라 동적 회피가 성립 안 함. `width`/`height` 는 **정수**로 |
+| MPPI 지평선 | `time_steps` 130 x `model_dt` 0.1 = 13 s (2.6 m) | 차체 1.62 m + 90도 선회호 2.04 m 를 담아야 회피 궤적이 나온다 |
 | 속도 한계 | vx 0.20, wz 0.30 (MPPI, velocity_smoother, behavior_server) | motor_node 의 `max_linear_vel` / `max_angular_vel` 와 동일해야 한다 |
 
 `cmd_vel` 의 (v, ω) 는 차량 중심(base_link) 속도이고 조향각 변환은 motor_node
 가 한다. 실제 최소회전반경은 (축간 1.29/2)/tan55° ≈ 0.45 m 라 1.30 은 보수값이다.
 
-**시작 위치 주의:** Smac 은 시작 footprint(0.77x0.44) 가 치명 셀과 겹치면
+**시작 위치 주의:** Smac 은 시작 footprint(0.81x0.48, local/global 동일) 가 치명 셀과 겹치면
 `Starting point in lethal space` 로 계획을 거부한다. 벽에 붙여 주차한 상태에서
 goal 을 주면 이 때문에 안 움직이니, 벽에서 20~30 cm 이상 떨어진 곳에서 시작한다.
 
@@ -187,12 +218,22 @@ goal 을 주면 이 때문에 안 움직이니, 벽에서 20~30 cm 이상 떨어
 `.yaml` 의 `image:` 는 반드시 상대경로로 둘 것. `/map_save` 서비스는 이 경로에
 덮어쓰므로 측위 중에는 부르지 않는다.
 
-맵을 바꾸면 이 네 곳을 같이 고쳐야 한다.
+맵 교체는 **launch 인자 하나**로 한다. 파일을 `navigation/map/` 에 `<이름>.yaml`
+(+ `.pgm`) 과 `<이름>.pcd` 짝으로 넣고:
 
-  fast_lio_localization/launch/localization.launch.py   2D 맵 기본값
-  fast_lio_localization/config/mid360.yaml              map_file_path (3D)
-  navigation/params/nav2_params.yaml                    map_server yaml_filename
-  navigation/map/                                       파일 자체
+```bash
+ros2 launch bringup bringup.launch.py map:=<이름>          # 실장비
+ros2 launch bringup bag_localization.launch.py map:=<이름> # bag 재생
+```
+
+`map` 인자가 2D(`<이름>.yaml` -> map_server) 와 3D(`<이름>.pcd` ->
+fast_lio_mapping / global_localization / global_map_publisher) 경로를 함께 만든다.
+`mid360.yaml` 과 `nav2_params.yaml` 에는 맵 경로가 없다 - 두 곳에 값이 남아 있으면
+인자를 바꿔도 조용히 옛 맵을 읽기 때문에 아예 지웠다.
+
+**새 파일은 넣은 뒤 `colcon build` 를 한 번 해야 한다.** `install/.../share/navigation/map/`
+는 파일별 심볼릭 링크라, 빌드하지 않으면 새 맵이 share 에 없어서
+`3D prior map 이 없다: ...` 에러가 난다.
 
 ## bag 재생 테스트
 

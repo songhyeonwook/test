@@ -9,6 +9,7 @@
   localization:=false   측위를 이미 따로 띄웠을 때
   navigation:=false     측위만 확인하고 싶을 때
   rviz:=false           rviz 없이
+  map:=<이름>           navigation/map/<이름>.yaml(2D) + <이름>.pcd(3D) 를 쓴다
 """
 import os
 
@@ -29,12 +30,14 @@ def generate_launch_description():
     localization = LaunchConfiguration('localization')
     navigation = LaunchConfiguration('navigation')
     rviz = LaunchConfiguration('rviz')
+    map_name = LaunchConfiguration('map')
 
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('localization', default_value='true'),
         DeclareLaunchArgument('navigation', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('map', default_value='test'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -45,7 +48,8 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(
                 os.path.join(loc_dir, 'launch', 'localization.launch.py')),
             condition=IfCondition(localization),
-            launch_arguments={'rviz': rviz, 'use_sim_time': 'false'}.items()),
+            launch_arguments={'rviz': rviz, 'use_sim_time': 'false',
+                              'map': map_name}.items()),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(

@@ -5,7 +5,8 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (LaunchConfiguration, PathJoinSubstitution,
+                                  TextSubstitution)
 
 from launch_ros.actions import Node
 
@@ -16,15 +17,19 @@ def generate_launch_description():
     # rviz 설정은 이 패키지 안에, 맵은 navigation 패키지가 들고 있다.
     # 2D(점유맵)와 3D(prior map)는 같은 주행에서 나온 짝이어야 하므로 한 곳에 둔다.
     default_rviz_config_path = os.path.join(package_path, 'rviz', 'fastlio_localization.rviz')
-    default_map_yaml_path = os.path.join(
-        get_package_share_directory('navigation'), 'map', 'test.yaml')
+    map_dir = os.path.join(get_package_share_directory('navigation'), 'map')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     config_path = LaunchConfiguration('config_path')
     config_file = LaunchConfiguration('config_file')
     rviz_use = LaunchConfiguration('rviz')
     rviz_cfg = LaunchConfiguration('rviz_cfg')
-    map_yaml = LaunchConfiguration('map_yaml')
+
+    # 맵을 바꾸는 유일한 손잡이. 여기서 2D(.yaml)와 3D(.pcd) 경로를 함께 만든다.
+    # 둘은 같은 주행에서 나온 짝이어야 하므로 애초에 따로 지정할 수 없게 했다.
+    map_name = LaunchConfiguration('map')
+    map_yaml = PathJoinSubstitution([map_dir, [map_name, TextSubstitution(text='.yaml')]])
+    map_pcd = PathJoinSubstitution([map_dir, [map_name, TextSubstitution(text='.pcd')]])
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time',
@@ -56,10 +61,11 @@ def generate_launch_description():
         description='RViz config file path'
     )
 
-    declare_map_yaml_cmd = DeclareLaunchArgument(
-        'map_yaml',
-        default_value=default_map_yaml_path,
-        description='2D occupancy map yaml path'
+    declare_map_cmd = DeclareLaunchArgument(
+        'map',
+        default_value='test',
+        description='맵 이름(확장자 없이). navigation/map/<이름>.yaml(2D) 과 '
+                    '<이름>.pcd(3D) 를 함께 쓴다'
     )
 
     # FAST-LIO 내부 프레임(camera_init)을 TF 에 올릴지. 정식 트리는
@@ -79,6 +85,8 @@ def generate_launch_description():
         name='fast_lio_mapping',
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
+            # launch 의 map 인자가 mid360.yaml 보다 뒤에 와서 덮어쓴다
+            {'map_file_path': map_pcd},
             {'use_sim_time': use_sim_time}
         ],
         output='screen'
@@ -90,6 +98,8 @@ def generate_launch_description():
         name='global_localization',
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
+            # launch 의 map 인자가 mid360.yaml 보다 뒤에 와서 덮어쓴다
+            {'map_file_path': map_pcd},
             {'use_sim_time': use_sim_time}
         ],
         output='screen'
@@ -113,6 +123,8 @@ def generate_launch_description():
         name='global_map_publisher',
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
+            # launch 의 map 인자가 mid360.yaml 보다 뒤에 와서 덮어쓴다
+            {'map_file_path': map_pcd},
             {'use_sim_time': use_sim_time}
         ],
         output='screen'
@@ -176,7 +188,7 @@ def generate_launch_description():
     ld.add_action(declare_config_file_cmd)
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
-    ld.add_action(declare_map_yaml_cmd)
+    ld.add_action(declare_map_cmd)
     ld.add_action(declare_debug_tf_cmd)
 
     ld.add_action(fast_lio_node)

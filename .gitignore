@@ -34,3 +34,6 @@ __pycache__/
 
 # ---- 참고용 사본 (빌드 대상 아님) ----
 src_rbio/
+
+# ---- tf2 view_frames 산출물 ----
+frames_*.gv

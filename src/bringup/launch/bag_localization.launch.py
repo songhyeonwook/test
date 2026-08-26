@@ -42,6 +42,7 @@ def generate_launch_description():
             description='재생할 rosbag 디렉토리'),
         DeclareLaunchArgument('rate', default_value='1.0'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('map', default_value='test'),
 
         # 차량/센서 TF
         IncludeLaunchDescription(
@@ -61,7 +62,8 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(loc_dir, 'launch', 'localization.launch.py')),
-            launch_arguments={'use_sim_time': 'true', 'rviz': rviz}.items()),
+            launch_arguments={'use_sim_time': 'true', 'rviz': rviz,
+                              'map': LaunchConfiguration('map')}.items()),
 
         # bag 재생. tf 계열은 지금 노드들이 다시 만들므로 재생하지 않는다.
         ExecuteProcess(

@@ -148,9 +148,13 @@ controller_server:
     # cmd_vel(v, w) -> 조향각 변환은 차량 하부 제어기가 담당한다.
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 60
-      model_dt: 0.1          # horizon 6s. 저속(0.2m/s) 플랫폼이라 거리로는 ~1.2m
-      batch_size: 1200       # Jetson 급에서 10Hz 를 지키도록 보수적으로 시작
+      # 지평선은 최소한 "차체 길이 + 최소회전반경 선회호" 를 담아야 한다.
+      # 차체 1.62m, 90도 선회 호 길이 = 1.30 * pi/2 = 2.04m.
+      # 130 * 0.1s = 13s -> 0.2m/s 로 2.6m. 회피 기동이 롤아웃 안에 들어온다.
+      # (이전 60스텝 = 1.2m 는 차체보다도 짧아서 회피 대신 감속만 나왔다)
+      time_steps: 130
+      model_dt: 0.1          # = 1/controller_frequency (MPPI 권장)
+      batch_size: 600        # batch*steps 를 이전(1200*60=72000)과 비슷한 78000 으로
       iteration_count: 1
       vx_std: 0.08
       vy_std: 0.0
@@ -165,15 +169,14 @@ controller_server:
       az_max: 0.5
       motion_model: "Ackermann"
       AckermannConstraints:
-        # TODO: 실측 최소회전반경으로 교체 (플래너 minimum_turning_radius 와
-        # 반드시 같은 값 유지)
+        # 플래너 GridBased.minimum_turning_radius 와 반드시 같은 값 유지.
         min_turning_r: 1.30
       prune_distance: 2.0
       transform_tolerance: 0.3
       temperature: 0.3
       gamma: 0.015
       visualize: false
-      regenerate_noises: false
+      regenerate_noises: true   # 동적 장애물 환경 권장값. 노이즈 재사용을 막는다
       TrajectoryVisualizer:
         trajectory_step: 5
         time_step: 3
@@ -236,7 +239,9 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
+      # controller_frequency(10Hz) 와 맞춘다. 5Hz 면 컨트롤러가 절반은 낡은
+      # 코스트맵으로 롤아웃한다. 입력 클라우드는 20Hz 라 여유가 있다.
+      update_frequency: 10.0
       publish_frequency: 2.0
       # REP-105: local costmap 은 연속 프레임인 odom 에 둔다. map 에 두면
       # global_localization 의 ICP 보정(map->odom 점프)이 회피 중인 장애물
@@ -245,11 +250,13 @@ local_costmap:
       robot_base_frame: base_link
       use_sim_time: False
       rolling_window: true
-      # NOTE:
-      # Explicit local costmap width/height overrides were crashing startup in our
-      # launch pipeline because the temporary rewritten YAML kept handing "height"
-      # to nav2 as an integer type. Keep Nav2 defaults here for reliable bringup
-      # and tune the visible local window again later with a dedicated workaround.
+      # width/height 는 nav2 에서 int 파라미터다. 12.0 처럼 실수로 쓰면 기동이
+      # 깨진다 (예전 "height 타입" 크래시의 원인). 반드시 정수로 적을 것.
+      # 기본값 5x5m 는 base_link 중심이라 앞범퍼(0.81) 기준 1.69m 밖에 안 보였다.
+      # 사람(1.2m/s)과 마주치면 경고시간이 1.2초라 회피가 성립하지 않는다.
+      # 12x12m -> 범퍼 앞 5.2m. obstacle_max_range 6.0 도 이제 거의 살아난다.
+      width: 12
+      height: 12
       resolution: 0.05
       # Vehicle footprint based on measured size:
       # length 1.62 m, max width 0.952 m, with small safety margin.
@@ -281,10 +288,17 @@ local_costmap:
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # MPPI 가 장애물을 미리 피해가려면 비용 기울기가 필요해서 0.05 에서
-        # 올렸다. costmap 권고상 footprint 내접반경(0.49)보다는 커야 한다.
+        # 내접반경(0.49)이 아니라 외접반경(0.94) 이상으로 잡아야 한다.
+        # nav2_mppi_controller/src/critics/cost_critic.cpp 의 inCollision 은
+        #   cost >= possibly_inscribed_cost_ 일 때만 실제 footprint 검사를 한다.
+        # possibly_inscribed_cost_ 는 외접반경에서의 인플레이션 비용(여기선 약 65)
+        # 인데, inflation_radius 가 0.55 면 장애물에서 0.55~0.94m 떨어진 셀은
+        # 비용이 0 이라 이 검사를 건너뛴다. 그런데 차체 대각 반경은 0.94m 라
+        # 그 구간에서 차체 모서리가 실제로 벽에 박혀도 충돌로 안 잡혔다.
+        # -> 0.95 로 올려서 검사 구간을 차체 외접원 전체로 덮는다.
+        # (253 은 CostCritic 이 충돌로 보지 않으므로 회피 여유만 늘어난다)
         cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+        inflation_radius: 0.95
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -298,10 +312,12 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: False
-      # Keep the local costmap conservative, but make the global planner
-      # slightly less strict so the robot can start planning from near-wall
-      # poses without immediately entering lethal space.
-      footprint: "[[0.77, 0.44], [0.77, -0.44], [-0.77, -0.44], [-0.77, 0.44]]"
+      # local costmap 과 반드시 같은 실측 footprint 를 쓴다. 전역이 더 작으면
+      # 플래너가 "지나갈 수 있다" 고 판단한 틈을 MPPI(CostCritic,
+      # consider_footprint=true)가 거부하면서 그 자리에 멈춘다.
+      # 벽에 붙여 주차했을 때의 "Starting point in lethal space" 는 footprint 를
+      # 줄여서가 아니라 출발 위치를 벽에서 20~30cm 띄워 푼다.
+      footprint: "[[0.81, 0.48], [0.81, -0.48], [-0.81, -0.48], [-0.81, 0.48]]"
       resolution: 0.05
       track_unknown_space: true
       # obstacle_layer 를 글로벌에도 넣어, 지도에 없는 장애물이 오래 머물면
@@ -328,16 +344,27 @@ global_costmap:
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 1.5
-        inflation_radius: 0.08
+        # 값 근거 (nav2_smac_planner/src/collision_checker.cpp):
+        #  - footprint 외곽 판정 임계는 OCCUPIED(254) 다. 253(INSCRIBED)은
+        #    외곽에 닿아도 충돌이 아니다.
+        #  - 중심 셀만 253/254 면 즉시 충돌. 253 띠 폭은 inflation_radius 와
+        #    무관하게 항상 min(inflation_radius, 내접반경 0.49) 로 잘린다.
+        #    -> 0.49 이상으로 키워도 진입금지 영역이 넓어지지 않는다.
+        #  - inflation_radius 가 외접반경(sqrt(0.81^2+0.48^2)=0.94) 보다 작으면
+        #    possible_inscribed_cost_ = 0 이 되어 Smac 이 매 노드마다 전체
+        #    footprint 검사를 도는 느린 경로로 떨어진다.
+        # 그래서 외접반경 이상인 0.95 로 둔다. 이때 비로소 0.49~0.95 구간에
+        # 감쇠 기울기가 생겨 Smac 의 cost_penalty 도 실제로 동작한다.
+        # (이전 0.08 은 nav2 자신이 "inscribed 0.490 보다 작다" 고 ERROR 를
+        #  찍던 값이다. 기울기가 없어 cost_penalty 가 무효였다.)
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.95
       always_send_full_costmap: True
 
-map_server:
-  ros__parameters:
-    use_sim_time: False
-    # launch 의 map 인자로 덮어쓸 수 있다. 여기 값은 nav2 가 자체 map_server 를
-    # 띄울 때만 쓰인다(측위는 localization.launch.py 가 따로 띄운다).
-    yaml_filename: "/home/shw/hw/src/navigation/map/test.yaml"
+# map_server 블록은 두지 않는다. navigation_launch.py 의 lifecycle_nodes 에
+# map_server 가 없어서 Nav2 는 자체 map_server 를 띄우지 않는다. 2D 점유맵은
+# localization.launch.py 가 띄운 map_server 가 /map 으로 발행하고 costmap 의
+# static_layer 가 그걸 구독한다. 맵 교체는 launch 의 map 인자 하나로 한다.
 
 map_saver:
   ros__parameters:
@@ -364,8 +391,10 @@ planner_server:
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      # TODO: Replace with measured minimum turning radius before field test.
-      minimum_turning_radius: 1.0 #1.30
+      # 반드시 MPPI 의 AckermannConstraints.min_turning_r 과 같은 값이어야 한다.
+      # 다르면 플래너가 컨트롤러가 못 따라가는 경로를 내고 코너에서 컷이 난다.
+      # (실측 (1.29/2)/tan55 = 0.45m 라 1.30 은 보수값)
+      minimum_turning_radius: 1.30
       reverse_penalty: 100.0
       change_penalty: 0.0
       non_straight_penalty: 1.05
