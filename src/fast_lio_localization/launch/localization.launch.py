@@ -17,7 +17,7 @@ def generate_launch_description():
     # 2D(점유맵)와 3D(prior map)는 같은 주행에서 나온 짝이어야 하므로 한 곳에 둔다.
     default_rviz_config_path = os.path.join(package_path, 'rviz', 'fastlio_localization.rviz')
     default_map_yaml_path = os.path.join(
-        get_package_share_directory('navigation'), 'map', 'scans_new.yaml')
+        get_package_share_directory('navigation'), 'map', 'test.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     config_path = LaunchConfiguration('config_path')

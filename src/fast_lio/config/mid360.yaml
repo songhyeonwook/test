@@ -7,7 +7,9 @@
         filter_size_map: 0.5
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
-        map_file_path: "./test.pcd"
+        # /map_save 서비스를 부르면 여기에 "쓴다". 기존 맵을 가리키면 덮어쓰므로
+        # 출력 디렉토리로 둔다. 다 만든 뒤 navigation/map/ 으로 직접 옮길 것.
+        map_file_path: "/home/shw/hw/src/fast_lio/PCD/scans.pcd"
 
         common:
             lid_topic:  "/livox_merge/merged_pointcloud"   # PointCloud2. 측위 설정과 동일하게 유지

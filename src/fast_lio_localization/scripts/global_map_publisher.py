@@ -12,7 +12,7 @@ from sensor_msgs_py import point_cloud2
 class MapPublisherNode(Node):
     def __init__(self):
         super().__init__('map_publisher')
-        self.declare_parameter('map_file_path', '/home/test/ros2_ws/src/FAST_LIO_LOCALIZATION_ROS2/PCD/output.pcd')
+        self.declare_parameter('map_file_path', '/home/shw/hw/src/navigation/map/test.pcd')
         self.declare_parameter('interval', 5)
         path = self.get_parameter('map_file_path').value
         interval = self.get_parameter('interval').value
