@@ -11,11 +11,11 @@ hw/
 │   ├── livox_ros_driver2/          MID-360 x3 드라이버 (CustomMsg)
 │   ├── livox_merge/                front/rear 2대를 하나로 병합 -> PointCloud2
 │   ├── fast_lio_localization/      FAST-LIO 측위 + ICP 전역정합 + tf_2d 평면화
-│   ├── motor_node/                 CAN 4WS 구동 (cmd_vel -> 조향/구동, /odom)
+│   ├── motor_node/                 CAN 4WS 구동. /mode 0 정렬·1 애커만·2 디프, /odom (4WS 휠 오도메트리)
 │   ├── navigation/                 ★ URDF/TF · Nav2 파라미터 · behavior tree · 맵
 │   └── bringup/                    ★ 전체 launch, bag 재생 테스트
-├── third_party/Livox-SDK2/         colcon 대상 아님. sudo make install 필요
-├── tools/                          check_frames.py, ply_to_pcd.py
+├── third_party/Livox-SDK2/         colcon 대상 아님. multi-NIC 패치 적용됨, cmake --install 필요
+├── tools/                          check_frames.py, ply_to_pcd.py, rbio_env.sh (rbio 스크립트 연동)
 └── bag/                            rosbag 기록 위치 (git 제외)
 ```
 
@@ -213,11 +213,16 @@ source install/setup.bash
 ## 실행
 
 ```bash
-# 터미널 1: 구동 (bringup.launch.py 에 포함되어 있지 않다)
-ros2 launch motor_node bringup.launch.py
-# 터미널 2: 센서 + 측위 + Nav2 + RViz
+# 구동(CAN) + 센서 + 측위 + Nav2 + RViz 한 번에
 ros2 launch bringup bringup.launch.py
+# 모터노드가 READY 가 되면 주행 모드를 골라준다 (기본은 0=정렬, 구동 차단)
+ros2 topic echo /motor_node/initialization_status --once   # READY|...
+ros2 topic pub -1 /mode std_msgs/Int32 "{data: 1}"         # 1=애커만(4WS 역위상)
 ```
+
+CAN 이 없는 개발 PC 에서는 `motor:=false`. 조이스틱 수동주행이 필요하면
+`ros2 launch motor_node bringup.launch.py` (모터노드 + teleop_twist_joy) 를 따로 띄우고
+bringup 은 `motor:=false` 로 — 모터노드가 둘 뜨면 CAN 을 같이 잡는다.
 
 그 다음 RViz 에서:
 
@@ -238,7 +243,7 @@ ros2 launch navigation navigation_launch.py                 # Nav2
 
 측위만 확인: `ros2 launch bringup bringup.launch.py navigation:=false`
 
-motor_node 의 launch 는 teleop_twist_joy 도 같이 띄우며 **같은 `/cmd_vel` 에
+`motor_node bringup.launch.py` 의 teleop_twist_joy 는 **같은 `/cmd_vel` 에
 발행**하므로 자율주행 중에는 조이스틱 enable 을 누르지 않는다. 수동 보조:
 
 ```bash
@@ -247,6 +252,40 @@ ros2 run motor_node homing_set.py
 ros2 run motor_node state_monitor.py
 cat ~/hw/src/motor_node/script/can_guide.txt              # can0 설정
 ```
+
+## motor_node (하부 구동)
+
+rbio TransferRobot motor_node 구조를 따른다: 주행 ID 1/3 은 Profile Velocity, 조향 ID 2/4 는
+Profile Position(0x607A) + New set-point/ACK 핸드셰이크. 시동 시 Fault reset 후 조향을 0 도로
+센터링하고 **mode 0(정렬)** 에서 대기한다. 조향 감속비 10:1, 엔코더 131072 pulse/rev,
+직진 = 0x6064 0 (rbio 기준).
+
+| `/mode` (Int32) | 모드 | 조향 | cmd_vel 해석 |
+|---|---|---|---|
+| 0 | ALIGN 정렬 | 앞뒤 0° 유지 | 무시, 구동 차단 |
+| 1 | ACKERMANN | 4WS 역위상 (뒤 = −앞) | `linear.x`, `angular.z` |
+| 2 | DIFF 디프 | 앞뒤 `diff_steer_deg`(90°) 고정 | `linear.x`(또는 `y`) = 횡이동(+좌), `angular.z` = 제자리 회전 |
+
+모드 전환은 **주행이 멈춘 뒤** 조향을 목표각으로 옮기고 3° 이내 도달하면 활성화된다
+(`motor_node/drive_mode` 에 `ALIGN|…`, `TO_DIFF|…`, `DIFF|…`). 애커만 진입 직후에는
+중립 cmd_vel 을 한 번 받아야 구동이 풀린다 (Nav2/조이스틱이 정지 명령을 보내므로 보통 자동).
+
+**오도메트리는 모드와 무관한 단일 모델**이다. 지령이 아니라 측정된 앞/뒤 조향각과
+앞/뒤 휠속도로 몸체 속도를 역산한다 (`v_f`, `v_r`: 접선속도, `δf`, `δr`: 조향각, L = 1.29):
+
+```
+vx = (v_f cosδf + v_r cosδr)/2,  vy = (v_f sinδf + v_r sinδr)/2,  wz = (v_f sinδf − v_r sinδr)/L
+```
+
+그래서 90° 디프 모드의 횡이동/제자리 회전, 전환 중, 90° 가 정확히 안 나온 경우에도 끊기지
+않고 맞는다. 피드백이 stale 이면 적분을 멈추고 공분산을 1e6 으로 키운다.
+`/odom` 은 twist(MPPI 속도 피드백)만 Nav2 가 쓰고, `odom->base_link` TF 는 tf_2d.py 가
+내므로 `publish_odom_tf` 는 false 로 둔다.
+
+토픽/서비스: `/mode`, `/cmd_vel`, `/odom`, `/steer_angle_deg`[전실제,후실제,전지령,후지령],
+`motor_node/{command_ack, diagnostics, initialization_status, drive_mode}`,
+`motor_node/initialize`(재초기화·센터링), `motor_node/reset_odom`. 파라미터는
+`src/motor_node/launch/motor.launch.py`.
 
 ## Nav2 구성
 
@@ -296,7 +335,7 @@ fast_lio_mapping / global_localization / global_map_publisher) 경로를 함께 
 ## bag 재생 테스트
 
 ```bash
-ros2 launch bringup bag_localization.launch.py            # 측위 (155초 재생)
+ros2 launch bringup bag_localization.launch.py            # 측위. 기본 bag 은 rosbag2_differential, bag:= 로 변경
 ros2 launch navigation navigation_launch.py use_sim_time:=true   # Nav2 까지 보려면
 ```
 

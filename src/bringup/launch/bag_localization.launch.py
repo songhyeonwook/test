@@ -38,7 +38,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'bag',
-            default_value=os.path.expanduser('~/hw/bag/bag/rosbag2_ackermann'),
+            default_value=os.path.expanduser('~/hw/bag/bag/rosbag2_differential'),
             description='재생할 rosbag 디렉토리'),
         DeclareLaunchArgument('rate', default_value='1.0'),
         DeclareLaunchArgument('rviz', default_value='true'),
