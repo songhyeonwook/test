@@ -62,6 +62,16 @@ def generate_launch_description():
         description='2D occupancy map yaml path'
     )
 
+    # FAST-LIO 내부 프레임(camera_init)을 TF 에 올릴지. 정식 트리는
+    # map->odom->base_link 뿐이고, RViz 에서 /cloud_registered 같은
+    # camera_init 프레임 토픽을 map 위에 겹쳐 볼 때만 켠다.
+    debug_tf = LaunchConfiguration('debug_tf')
+    declare_debug_tf_cmd = DeclareLaunchArgument(
+        'debug_tf',
+        default_value='false',
+        description='Publish debug TF map->camera_init (RViz inspection only)'
+    )
+
     # FAST-LIO localization
     fast_lio_node = Node(
         package='fast_lio_localization',
@@ -91,7 +101,8 @@ def generate_launch_description():
         name='transform_fusion',
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
-            {'use_sim_time': use_sim_time}
+            {'use_sim_time': use_sim_time},
+            {'publish_debug_tf': debug_tf}
         ],
         output='screen'
     )
@@ -107,23 +118,15 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 2D TF bridge: map -> odom -> base_link
+    # 2D TF bridge: /Odometry + /map_to_odom 토픽 -> map -> odom -> base_link
+    # body(IMU) -> 차량 기준점 extrinsic(ref_from_body_*)은 mid360.yaml 에 있다.
     tf_2d_bridge_node = Node(
         package='fast_lio_localization',
         executable='tf_2d.py',
         name='tf_2d_bridge',
         parameters=[
-            {'use_sim_time': use_sim_time},
-            {'parent_3d': 'map'},
-            {'odom_2d': 'odom'},
-            {'base_2d': 'base_link'},
-            {'caminit': 'camera_init'},
-            # FAST-LIO 의 'body' 는 차량 기준점이 아니라 IMU 프레임이고, 상단
-            # 라이다와 함께 누워 있다. 그대로 평면화하면 yaw 가 엉키고 base_link
-            # 가 마스트 위에 생긴다. description 의 fastlio_ref.urdf.xacro 가
-            # body 아래에 차량 정렬된 기준 프레임을 하나 두므로 그걸 쓴다.
-            {'body': 'fastlio_ref'},
-            {'rate_hz': 50.0}
+            PathJoinSubstitution([config_path, config_file]),
+            {'use_sim_time': use_sim_time}
         ],
         output='screen'
     )
@@ -174,6 +177,7 @@ def generate_launch_description():
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
     ld.add_action(declare_map_yaml_cmd)
+    ld.add_action(declare_debug_tf_cmd)
 
     ld.add_action(fast_lio_node)
     ld.add_action(global_localization_node)

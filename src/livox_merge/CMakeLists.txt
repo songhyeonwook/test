@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
+# PCL_ROOT 같은 <Pkg>_ROOT 변수를 find_package 가 쓰도록 한다.
+# 안 켜면 cmake 가 무시하면서 CMP0074 경고를 낸다.
+if(POLICY CMP0074)
+  cmake_policy(SET CMP0074 NEW)
+endif()
 project(livox_merge)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")

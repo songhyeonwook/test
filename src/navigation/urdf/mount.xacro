@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  장착값 한 곳. vehicle.urdf.xacro 와 fastlio_ref.urdf.xacro 가 같이 읽는다.
+  장착값 한 곳. vehicle.urdf.xacro 가 읽는다.
   값을 고치면 반드시 tools/check_frames.py 로 livox_merge / fast_lio 설정과의
   정합을 확인할 것.
 -->
@@ -26,9 +26,8 @@
   <!-- MID-360 몸통 원점 -> 내부 IMU (Livox 공장값) -->
   <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
 
-  <!-- FAST-LIO 의 body(=IMU) 에서 본 차량 기준점.
-       inverse( T(base_footprint<-livox_top) * T(livox_top<-IMU) ) -->
-  <xacro:property name="ref_from_body_xyz" value="0.0 0.82321 -0.23088"/>
-  <xacro:property name="ref_from_body_rpy" value="${-pi/2} 0 ${-pi}"/>
+  <!-- FAST-LIO 의 body(=IMU) 에서 본 차량 기준점은 여기 없다.
+       fast_lio_localization/config/mid360.yaml 의 ref_from_body_* 를 볼 것.
+       (tf_2d.py 가 파라미터로 받는다) -->
 
 </robot>

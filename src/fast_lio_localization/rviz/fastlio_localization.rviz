@@ -308,12 +308,6 @@ Visualization Manager:
           Value: true
         base_link:
           Value: true
-        body:
-          Value: true
-        camera_init:
-          Value: true
-        fastlio_ref:
-          Value: true
         imu_link:
           Value: true
         livox_frame:
@@ -335,10 +329,6 @@ Visualization Manager:
       Show Names: true
       Tree:
         map:
-          camera_init:
-            body:
-              fastlio_ref:
-                {}
           odom:
             base_link:
               base_footprint:
@@ -415,7 +405,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 0.8497970104217529
-      Target Frame: body
+      Target Frame: base_link
       Value: Orbit (rviz)
       Yaw: 4.890408515930176
     Saved: ~

@@ -10,8 +10,9 @@
   map->odom, odom->base_link 은 tf_2d.py 가 낸다. base_link 는 이 URDF 의
   루트이므로 여기서는 발행하지 않는다(부모가 둘이 되면 TF 가 깨진다).
 
-  FAST-LIO 의 camera_init / body 는 여기 없다. 그쪽은 측위 엔진 내부 프레임이라
-  fastlio_ref.urdf.xacro 로 분리했다.
+  FAST-LIO 의 camera_init / body 는 측위 엔진 내부 프레임이라 TF 에 올리지
+  않는다(debug_tf 로만 켠다). body -> 차량 기준점 extrinsic 은
+  fast_lio_localization/config/mid360.yaml 의 ref_from_body_* 가 든다.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="vehicle">
   <xacro:include filename="mount.xacro"/>

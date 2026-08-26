@@ -1,14 +1,31 @@
 #!/usr/bin/env python3
+"""FAST-LIO 3D 오도메트리를 Nav2 용 2D TF 로 변환한다.
+
+TF lookup 없이 토픽만 구독한다. camera_init / body 는 TF 프레임으로 쓰지 않는다.
+
+  구독  /Odometry     camera_init -> body   (FAST-LIO, 라이다 주기 ~10Hz)
+        /map_to_odom  map -> camera_init 보정 (global_localization, 저주기)
+
+  발행  map -> odom        planarize(map->camera_init)  보정(점프)을 흡수
+        odom -> base_link  나머지 연속 오도메트리
+
+body 는 차량 기준점이 아니라 옆으로 누운 상단 라이다의 IMU 프레임이라 그대로
+평면화하면 yaw 가 엉킨다. ref_from_body_* (body -> 차량 정렬 기준점, mid360.yaml)
+를 곱한 뒤 평면화한다. 값 정합은 tools/check_frames.py 가 검사한다.
+
+TF 는 오도메트리 stamp 로 내고, 라이다 주기(~10Hz)가 Nav2 transform_tolerance
+(0.1s)에 빠듯하므로 keepalive 타이머가 최신값을 현재 시각으로 재발행해 준다.
+"""
 import math
+
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
-from rclpy.duration import Duration
 
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
 
 
 class Tf2DBridge(Node):
@@ -16,31 +33,46 @@ class Tf2DBridge(Node):
         super().__init__('tf_2d_bridge')
 
         # ===== Parameters =====
-        self.declare_parameter('parent_3d', 'map')
-        self.declare_parameter('odom_2d', 'odom')
-        self.declare_parameter('base_2d', 'base_link')
-        self.declare_parameter('caminit', 'camera_init')
-        self.declare_parameter('body', 'body')
-        self.declare_parameter('rate_hz', 50.0)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('odom_topic', '/Odometry')
+        self.declare_parameter('map_to_odom_topic', '/map_to_odom')
+        # body(IMU) 에서 본 차량 정렬 기준점.
+        # 기본값 0 은 자리표시자다. 반드시 mid360.yaml 에서 받아야 한다.
+        self.declare_parameter('ref_from_body_xyz', [0.0, 0.0, 0.0])
+        self.declare_parameter('ref_from_body_rpy', [0.0, 0.0, 0.0])
+        self.declare_parameter('keepalive_rate_hz', 50.0)
 
-        self.parent_3d = self.get_parameter('parent_3d').value
-        self.odom_2d = self.get_parameter('odom_2d').value
-        self.base_2d = self.get_parameter('base_2d').value
-        self.caminit = self.get_parameter('caminit').value
-        self.body = self.get_parameter('body').value
-        self.rate_hz = float(self.get_parameter('rate_hz').value)
+        self.map_frame = self.get_parameter('map_frame').value
+        self.odom_frame = self.get_parameter('odom_frame').value
+        self.base_frame = self.get_parameter('base_frame').value
+        odom_topic = self.get_parameter('odom_topic').value
+        map_to_odom_topic = self.get_parameter('map_to_odom_topic').value
+        xyz = self.get_parameter('ref_from_body_xyz').value
+        rpy = self.get_parameter('ref_from_body_rpy').value
+        keepalive_hz = float(self.get_parameter('keepalive_rate_hz').value)
 
-        # ===== TF =====
-        self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=10.0))
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.T_body_ref = np.eye(4)
+        self.T_body_ref[:3, :3] = self.rpy_to_rot(*rpy)
+        self.T_body_ref[:3, 3] = xyz
+
+        self.T_map_cam = np.eye(4)   # /map_to_odom 수신 전에는 항등
+        self.last_map_odom = None    # (M, q) 마지막으로 계산한 map->odom
+        self.last_odom_base = None   # (M, q) 마지막으로 계산한 odom->base_link
+
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
-        period = 1.0 / self.rate_hz if self.rate_hz > 0.0 else 0.02
-        self.timer = self.create_timer(period, self.on_timer)
+        self.create_subscription(Odometry, odom_topic, self.cb_odometry, 10)
+        self.create_subscription(
+            Odometry, map_to_odom_topic, self.cb_map_to_odom, 1)
+
+        if keepalive_hz > 0.0:
+            self.create_timer(1.0 / keepalive_hz, self.on_keepalive)
 
         self.get_logger().info(
-            f'tf_2d_bridge started: {self.parent_3d}->{self.caminit}->{self.body} '
-            f' ==> {self.parent_3d}->{self.odom_2d}->{self.base_2d}'
+            f'tf_2d_bridge started: {odom_topic} + {map_to_odom_topic} '
+            f'==> {self.map_frame}->{self.odom_frame}->{self.base_frame}'
         )
 
     # ---------- math helpers ----------
@@ -60,27 +92,35 @@ class Tf2DBridge(Node):
         R = np.array([
             [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz),       2.0 * (xz + wy)],
             [2.0 * (xy + wz),       1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-            [2.0 * (xz - wy),       2.0 * (yz + wx),       1.0 - 2.0 * (xx + yy)],
+            [2.0 * (xz - wy),       2.0 * (yz + wx),   1.0 - 2.0 * (xx + yy)],
         ], dtype=float)
         return R
 
     @staticmethod
-    def transform_to_matrix(t: TransformStamped):
-        """geometry_msgs/TransformStamped -> 4x4 homogeneous matrix"""
-        tx = t.transform.translation.x
-        ty = t.transform.translation.y
-        tz = t.transform.translation.z
+    def rpy_to_rot(r, p, y):
+        """URDF 관례(Rz*Ry*Rx)의 rpy -> 3x3 rotation matrix"""
+        def Rx(a):
+            c, s = math.cos(a), math.sin(a)
+            return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=float)
 
-        qx = t.transform.rotation.x
-        qy = t.transform.rotation.y
-        qz = t.transform.rotation.z
-        qw = t.transform.rotation.w
+        def Ry(a):
+            c, s = math.cos(a), math.sin(a)
+            return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=float)
 
+        def Rz(a):
+            c, s = math.cos(a), math.sin(a)
+            return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=float)
+
+        return Rz(y) @ Ry(p) @ Rx(r)
+
+    @staticmethod
+    def odom_pose_to_matrix(msg: Odometry):
+        """nav_msgs/Odometry pose -> 4x4 homogeneous matrix"""
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
         M = np.eye(4, dtype=float)
-        M[:3, :3] = Tf2DBridge.quat_to_rot(qx, qy, qz, qw)
-        M[0, 3] = tx
-        M[1, 3] = ty
-        M[2, 3] = tz
+        M[:3, :3] = Tf2DBridge.quat_to_rot(q.x, q.y, q.z, q.w)
+        M[:3, 3] = [p.x, p.y, p.z]
         return M
 
     @staticmethod
@@ -134,57 +174,39 @@ class Tf2DBridge(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
-    # ---------- main loop ----------
-    def on_timer(self):
-        try:
-            # Read 3D TF chain
-            t_parent_cam = self.tf_buffer.lookup_transform(
-                self.parent_3d,
-                self.caminit,
-                Time(),
-                timeout=Duration(seconds=0.1)
-            )
-            t_cam_body = self.tf_buffer.lookup_transform(
-                self.caminit,
-                self.body,
-                Time(),
-                timeout=Duration(seconds=0.1)
-            )
+    def publish_chain(self, stamp):
+        M_mo, q_mo = self.last_map_odom
+        M_ob, q_ob = self.last_odom_base
+        self.publish_tf(M_mo, q_mo, self.map_frame, self.odom_frame, stamp)
+        self.publish_tf(M_ob, q_ob, self.odom_frame, self.base_frame, stamp)
 
-            M_parent_cam = self.transform_to_matrix(t_parent_cam)
-            M_cam_body = self.transform_to_matrix(t_cam_body)
-            M_parent_body = M_parent_cam @ M_cam_body
+    # ---------- callbacks ----------
+    def cb_map_to_odom(self, msg: Odometry):
+        self.T_map_cam = self.odom_pose_to_matrix(msg)
 
-            # Planarize to 2D
-            M_parent_odom2d, q_parent_odom2d = self.planarize(M_parent_cam)
-            M_parent_base2d, _ = self.planarize(M_parent_body)
+    def cb_odometry(self, msg: Odometry):
+        T_map_cam = self.T_map_cam
+        T_cam_body = self.odom_pose_to_matrix(msg)
+        T_map_ref = T_map_cam @ T_cam_body @ self.T_body_ref
 
-            # Compute odom -> base_link
-            M_odom_base2d = np.linalg.inv(M_parent_odom2d) @ M_parent_base2d
-            yaw_odom_base = self.yaw_from_matrix(M_odom_base2d)
-            q_odom_base2d = self.quat_from_yaw(yaw_odom_base)
+        # odom = planarize(map->camera_init). 보정이 없으면 map 과 일치한다.
+        M_map_odom, q_map_odom = self.planarize(T_map_cam)
+        M_map_base, _ = self.planarize(T_map_ref)
 
-            now = self.get_clock().now().to_msg()
+        M_odom_base = np.linalg.inv(M_map_odom) @ M_map_base
+        q_odom_base = self.quat_from_yaw(self.yaw_from_matrix(M_odom_base))
 
-            # Publish 2D TFs for Nav2
-            self.publish_tf(
-                M_parent_odom2d,
-                q_parent_odom2d,
-                self.parent_3d,
-                self.odom_2d,
-                now
-            )
-            self.publish_tf(
-                M_odom_base2d,
-                q_odom_base2d,
-                self.odom_2d,
-                self.base_2d,
-                now
-            )
+        self.last_map_odom = (M_map_odom, q_map_odom)
+        self.last_odom_base = (M_odom_base, q_odom_base)
 
-        except Exception:
-            # TF가 아직 안 올라왔거나 잠깐 lookup 실패하면 다음 주기에 재시도
-            pass
+        # 센서 데이터와 시간축이 맞도록 오도메트리 stamp 그대로 낸다.
+        self.publish_chain(msg.header.stamp)
+
+    def on_keepalive(self):
+        # 라이다 주기 사이를 메꾼다. odom 정지 가정으로 최신값을 재발행.
+        if self.last_map_odom is None:
+            return
+        self.publish_chain(self.get_clock().now().to_msg())
 
 
 def main(args=None):

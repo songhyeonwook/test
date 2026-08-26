@@ -11,8 +11,6 @@ log/
 **/doc/results/
 
 # ---- 실행하면 새로 생기는 산출물 ----
-src/fast_lio/PCD/*.pcd
-src/fast_lio/Log/
 src/fast_lio_localization/Log/
 
 # ---- rosbag ----

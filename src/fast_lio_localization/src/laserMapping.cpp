@@ -74,6 +74,9 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+// camera_init->body TF. 정식 트리는 tf_2d.py 가 내는 map->odom->base_link 라
+// 평소에는 끈다. 디버그로 camera_init 프레임 클라우드를 볼 때만 켠다.
+bool   tf_pub_en = true;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -644,18 +647,21 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i*6 + 5] = P(k, 2);
     }
 
-    geometry_msgs::msg::TransformStamped trans;
-    trans.header.frame_id = "camera_init";
-    trans.header.stamp = odomAftMapped.header.stamp;
-    trans.child_frame_id = "body";
-    trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
-    trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
-    trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
-    trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
-    trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
-    trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
-    trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
-    tf_br->sendTransform(trans);
+    if (tf_pub_en)
+    {
+        geometry_msgs::msg::TransformStamped trans;
+        trans.header.frame_id = "camera_init";
+        trans.header.stamp = odomAftMapped.header.stamp;
+        trans.child_frame_id = "body";
+        trans.transform.translation.x = odomAftMapped.pose.pose.position.x;
+        trans.transform.translation.y = odomAftMapped.pose.pose.position.y;
+        trans.transform.translation.z = odomAftMapped.pose.pose.position.z;
+        trans.transform.rotation.w = odomAftMapped.pose.pose.orientation.w;
+        trans.transform.rotation.x = odomAftMapped.pose.pose.orientation.x;
+        trans.transform.rotation.y = odomAftMapped.pose.pose.orientation.y;
+        trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
+        tf_br->sendTransform(trans);
+    }
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -804,6 +810,7 @@ public:
         this->declare_parameter<bool>("publish.scan_publish_en", true);
         this->declare_parameter<bool>("publish.dense_publish_en", true);
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
+        this->declare_parameter<bool>("publish.tf_en", true);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
@@ -840,6 +847,7 @@ public:
         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+        this->get_parameter_or<bool>("publish.tf_en", tf_pub_en, true);
         this->get_parameter_or<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
         this->get_parameter_or<string>("map_file_path", map_file_path, "");
         this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");

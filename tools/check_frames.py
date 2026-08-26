@@ -2,9 +2,11 @@
 """URDF 와 각 설정 파일의 장착값이 서로 맞는지 검사한다.
 
 같은 기하 정보가 세 군데에 있다:
-  src/navigation/urdf/mount.xacro            TF 값의 원본 (두 urdf 가 include)
+  src/navigation/urdf/mount.xacro            TF 값의 원본 (vehicle urdf 가 include)
   src/livox_merge/config/livox_merge_config.yaml   포인트 병합
-  src/fast_lio*/config/mid360.yaml            FAST-LIO 의 lidar->IMU extrinsic
+  src/fast_lio_localization/config/mid360.yaml  lidar->IMU extrinsic,
+                                               tf_2d 의 ref_from_body_*
+                                              + tf_2d 의 ref_from_body (역변환)
 
 한 곳만 고치고 나머지를 안 고치면 조용히 어긋난다. 값을 만질 때마다 돌릴 것.
 
@@ -45,7 +47,6 @@ def urdf_joints(path):
 def main():
     ok = True
     J = urdf_joints('src/navigation/urdf/vehicle.urdf.xacro')
-    JR = urdf_joints('src/navigation/urdf/fastlio_ref.urdf.xacro')
 
     def check(label, a, b, tol=1e-4):
         nonlocal ok
@@ -73,8 +74,7 @@ def main():
         @ np.block([[np.eye(3), IMU_IN_LIDAR.reshape(3, 1)], [np.zeros((1, 3)), 1.0]]))
 
     print("\nFAST-LIO extrinsic vs URDF (base_footprint -> IMU)")
-    for f in ['src/fast_lio/config/mid360.yaml',
-              'src/fast_lio_localization/config/mid360.yaml']:
+    for f in ['src/fast_lio_localization/config/mid360.yaml']:
         txt = open(f).read()
         T = [float(v) for v in re.search(r'extrinsic_T:\s*\[([^\]]+)\]', txt).group(1).split(',')]
         R = re.search(r'extrinsic_R:\s*\[([^\]]+)\]', txt, re.S).group(1)
@@ -82,8 +82,14 @@ def main():
         check(f"{f} extrinsic_T", T, imu_bf[:3, 3])
         check(f"{f} extrinsic_R", R, imu_bf[:3, :3])
 
-    print("\nURDF 내부 정합")
-    check("body<-fastlio_ref (tf_2d 평면화 대상)", JR[('body', 'fastlio_ref')], imu_bf)
+    print("\ntf_2d ref_from_body (body -> 차량 기준점) vs URDF")
+    loc = yaml.safe_load(
+        open('src/fast_lio_localization/config/mid360.yaml'))
+    loc = loc['/**']['ros__parameters']
+    M = np.eye(4)
+    M[:3, :3] = rot(loc['ref_from_body_rpy'])
+    M[:3, 3] = loc['ref_from_body_xyz']
+    check("mid360.yaml ref_from_body", M, imu_bf)
 
     f = J[('base_footprint', 'livox_front')][:3, 3]
     r = J[('base_footprint', 'livox_rear')][:3, 3]

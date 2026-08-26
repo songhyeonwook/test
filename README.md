@@ -12,9 +12,7 @@ hw/
 ├── src/                            colcon 워크스페이스 (여기 하나뿐)
 │   ├── livox_ros_driver2/          MID-360 x3 드라이버
 │   ├── livox_merge/                front/rear 2대를 하나로 병합
-│   ├── fast_lio/                   매핑 (맵 만들 때만)
 │   ├── fast_lio_localization/      측위 + tf_2d 평면화
-│   ├── pcd2pgm/                    3D PCD -> 2D 점유맵
 │   ├── motor_node/                 CAN 구동
 │   ├── navigation/                 ★ URDF/TF · Nav2 파라미터 · behavior tree · 맵
 │   └── bringup/                    ★ 전체 launch
@@ -88,7 +86,7 @@ map ─┬─ odom ── base_link ── base_footprint ─┬─ livox_frame
   * `src/navigation/urdf/mount.xacro`            장착값 원본, 둘이 같이 읽는다
 
 센서 위치를 바꾸면 `mount.xacro` 만 고치고 `python3 tools/check_frames.py` 로
-livox_merge / fast_lio 설정과의 정합을 확인한다.
+livox_merge / fast_lio_localization 설정과의 정합을 확인한다.
 
 ---
 
@@ -162,18 +160,20 @@ ros2 run motor_node state_monitor.py
 
 ## 맵 만들기
 
-```bash
-ros2 launch bringup sensors.launch.py
-ros2 launch fast_lio mapping.launch.py        # -> src/fast_lio/PCD/scans.pcd
-ros2 run pcd2pgm pcd2pgm                      # 3D PCD -> 2D pgm
-```
+**매핑 패키지는 이 워크스페이스에 없다.** `fast_lio`(매핑)와 `pcd2pgm`(3D->2D
+변환)은 주행에 쓰이지 않아 제거했다. 맵을 새로 만들어야 하면 두 패키지를 다시
+받아서 별도 워크스페이스에서 돌리고, 결과물만 `src/navigation/map/` 으로 옮긴다.
 
-결과물을 `src/navigation/map/` 에 넣고 `colcon build --packages-select navigation`
-으로 다시 설치한다. `.yaml` 의 `image:` 는 반드시 상대경로로 둘 것.
+현재 맵은 `test.pcd`(3D, 측위용) + `test.pgm`/`test.yaml`(2D, 코스트맵용) 이다.
+**둘은 같은 주행에서 나온 짝이어야 한다** — 어긋나면 로봇이 벽 속에 있다고
+나온다. `.yaml` 의 `image:` 는 반드시 상대경로로 둘 것.
 
-3D(`output.pcd`)와 2D(`scans_new.pgm`)는 **같은 주행에서 나온 짝이어야 한다** —
-측위는 3D 를, Nav2 코스트맵은 2D 를 쓰기 때문에 어긋나면 로봇이 벽 속에 있다고
-나온다.
+맵을 바꾸면 이 네 곳을 같이 고쳐야 한다.
+
+  fast_lio_localization/launch/localization.launch.py   2D 맵 기본값
+  fast_lio_localization/config/mid360.yaml              map_file_path (3D)
+  navigation/params/nav2_params.yaml                    map_server yaml_filename
+  navigation/map/                                       파일 자체
 
 ## bag 재생 측위 테스트
 

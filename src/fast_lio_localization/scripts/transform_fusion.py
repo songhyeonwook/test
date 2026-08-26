@@ -22,6 +22,13 @@ class TransformFusionNode(Node):
         super().__init__('transform_fusion')
         self.FREQ_PUB_LOCALIZATION = 50.0  # Hz
 
+        # map->camera_init TF. 정식 트리(map->odom->base_link)는 tf_2d.py 가
+        # 내므로 평소에는 끈다. RViz 에서 camera_init 프레임 클라우드
+        # (/cloud_registered 등)를 map 위에 겹쳐 볼 때만 켠다.
+        self.declare_parameter('publish_debug_tf', False)
+        self.publish_debug_tf = bool(
+            self.get_parameter('publish_debug_tf').value)
+
         self.lock = threading.Lock()
         self.cur_odom_to_baselink = None
         self.cur_map_to_odom = None
@@ -66,19 +73,20 @@ class TransformFusionNode(Node):
         trans = tf_transformations.translation_from_matrix(T_map_to_odom)
         quat  = tf_transformations.quaternion_from_matrix(T_map_to_odom)
 
-        # tf 브로드캐스트
-        t_msg = TransformStamped()
-        t_msg.header.stamp = self.get_clock().now().to_msg()
-        t_msg.header.frame_id    = 'map'
-        t_msg.child_frame_id     = 'camera_init'
-        t_msg.transform.translation.x = trans[0]
-        t_msg.transform.translation.y = trans[1]
-        t_msg.transform.translation.z = trans[2]
-        t_msg.transform.rotation.x    = quat[0]
-        t_msg.transform.rotation.y    = quat[1]
-        t_msg.transform.rotation.z    = quat[2]
-        t_msg.transform.rotation.w    = quat[3]
-        self.tf_broadcaster.sendTransform(t_msg)
+        # 디버그 tf 브로드캐스트
+        if self.publish_debug_tf:
+            t_msg = TransformStamped()
+            t_msg.header.stamp = self.get_clock().now().to_msg()
+            t_msg.header.frame_id    = 'map'
+            t_msg.child_frame_id     = 'camera_init'
+            t_msg.transform.translation.x = trans[0]
+            t_msg.transform.translation.y = trans[1]
+            t_msg.transform.translation.z = trans[2]
+            t_msg.transform.rotation.x    = quat[0]
+            t_msg.transform.rotation.y    = quat[1]
+            t_msg.transform.rotation.z    = quat[2]
+            t_msg.transform.rotation.w    = quat[3]
+            self.tf_broadcaster.sendTransform(t_msg)
 
         # fused localization
         T_odom_to_base = self.pose_to_mat(odom)
