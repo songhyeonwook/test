@@ -23,6 +23,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     bringup_dir = get_package_share_directory('bringup')
     loc_dir = get_package_share_directory('fast_lio_localization')
+    nav_dir = get_package_share_directory('navigation')
 
     sensors = LaunchConfiguration('sensors')
     localization = LaunchConfiguration('localization')
@@ -48,10 +49,10 @@ def generate_launch_description():
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(bringup_dir, 'launch', 'navigation_launch.py')),
+                os.path.join(nav_dir, 'launch', 'navigation_launch.py')),
             condition=IfCondition(navigation),
             launch_arguments={
                 'use_sim_time': 'false',
-                'params_file': os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
+                'params_file': os.path.join(nav_dir, 'params', 'nav2_params.yaml'),
             }.items()),
     ])

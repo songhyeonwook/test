@@ -20,11 +20,8 @@
   <!-- 측위 -->
   <exec_depend>fast_lio_localization</exec_depend>
 
-  <!-- 내비게이션 (apt: ros-humble-navigation2) -->
-  <exec_depend>nav2_bringup</exec_depend>
-  <exec_depend>nav2_map_server</exec_depend>
-  <exec_depend>nav2_lifecycle_manager</exec_depend>
-  <exec_depend>nav2_common</exec_depend>
+  <!-- 내비게이션 -->
+  <exec_depend>navigation</exec_depend>
 
   <!-- 구동 -->
   <exec_depend>motor_node</exec_depend>

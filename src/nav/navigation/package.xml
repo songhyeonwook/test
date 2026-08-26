@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>navigation</name>
+  <version>1.0.0</version>
+  <description>
+    Nav2 설정. nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기에는 이 차량에
+    맞춰 실제로 손댄 파라미터·behavior tree·launch 만 들어 있다.
+  </description>
+  <maintainer email="hwkorea2011@gmail.com">shw</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

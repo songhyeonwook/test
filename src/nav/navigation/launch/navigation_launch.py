@@ -28,13 +28,13 @@ from nav2_common.launch import RewrittenYaml
 
 def generate_launch_description():
     # Get the launch directory
-    # nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기서 쓰는 파라미터/behavior tree/
-    # 맵은 전부 bringup 이 들고 있다.
-    bringup_dir = get_package_share_directory('bringup')
+    # nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기서 쓰는 파라미터와
+    # behavior tree 는 이 패키지가 들고 있다.
+    nav_dir = get_package_share_directory('navigation')
     default_nav_to_pose_bt_xml = os.path.join(
-        bringup_dir, 'behavior_trees', 'navigate_to_pose_vehicle.xml')
+        nav_dir, 'behavior_trees', 'navigate_to_pose_vehicle.xml')
     default_nav_through_poses_bt_xml = os.path.join(
-        bringup_dir, 'behavior_trees', 'navigate_through_poses_vehicle.xml')
+        nav_dir, 'behavior_trees', 'navigate_through_poses_vehicle.xml')
 
     namespace = LaunchConfiguration('namespace')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -93,7 +93,7 @@ def generate_launch_description():
 
     declare_params_file_cmd = DeclareLaunchArgument(
         'params_file',
-        default_value=os.path.join(bringup_dir, 'params', 'nav2_params.yaml'),
+        default_value=os.path.join(nav_dir, 'params', 'nav2_params.yaml'),
         description='Full path to the ROS2 parameters file to use for all launched nodes')
 
     declare_autostart_cmd = DeclareLaunchArgument(
