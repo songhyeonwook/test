@@ -11,6 +11,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -21,6 +24,9 @@ add_executable(motor_node src/motor_node.cpp)
 ament_target_dependencies(motor_node
   rclcpp
   geometry_msgs
+  diagnostic_msgs
+  std_msgs
+  std_srvs
   nav_msgs
   tf2
   tf2_ros
