@@ -39,7 +39,7 @@ def main(args=None):
     # 단회성 발행이므로 spin_once로 잠깐 실행 후 종료
     rclpy.spin_once(node, timeout_sec=1.0)
     node.destroy_node()
-    rclpy.shutdown()
+    rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()

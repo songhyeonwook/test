@@ -57,7 +57,10 @@ class Tf2DBridge(Node):
         self.T_body_ref[:3, :3] = self.rpy_to_rot(*rpy)
         self.T_body_ref[:3, 3] = xyz
 
-        self.T_map_cam = np.eye(4)   # /map_to_odom 수신 전에는 항등
+        # /map_to_odom 수신 전 기본값. 항등으로 두면 camera_init(옆으로 누운
+        # IMU 프레임)의 90도 roll 이 그대로 평면화에 들어가 경로 모양이 뭉개진다.
+        # 시동 시 차량이 수평이라 가정해 차량 기준점을 map 원점에 수평으로 둔다.
+        self.T_map_cam = np.linalg.inv(self.T_body_ref)
         self.last_map_odom = None    # (M, q) 마지막으로 계산한 map->odom
         self.last_odom_base = None   # (M, q) 마지막으로 계산한 odom->base_link
 
@@ -218,7 +221,7 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
