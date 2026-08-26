@@ -26,7 +26,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     bringup_dir = get_package_share_directory('bringup')
-    desc_dir = get_package_share_directory('description')
+    nav_dir = get_package_share_directory('navigation')
     loc_dir = get_package_share_directory('fast_lio_localization')
 
     bag = LaunchConfiguration('bag')
@@ -46,7 +46,7 @@ def generate_launch_description():
         # 차량/센서 TF
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(desc_dir, 'launch', 'description.launch.py')),
+                os.path.join(nav_dir, 'launch', 'description.launch.py')),
             launch_arguments={'use_sim_time': 'true'}.items()),
 
         # 두 라이다 병합 (PointCloud2 입력)

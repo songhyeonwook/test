@@ -24,7 +24,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    urdf_dir = os.path.join(get_package_share_directory('description'), 'urdf')
+    urdf_dir = os.path.join(get_package_share_directory('navigation'), 'urdf')
     use_sim_time = LaunchConfiguration('use_sim_time')
 
     def rsp(name, xacro_file, topic):

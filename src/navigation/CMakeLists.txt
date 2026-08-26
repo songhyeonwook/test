@@ -7,6 +7,9 @@ install(DIRECTORY
   launch
   params
   behavior_trees
+  map
+  urdf
+  rviz
   DESTINATION share/${PROJECT_NAME}
 )
 

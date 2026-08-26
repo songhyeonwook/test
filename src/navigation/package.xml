@@ -3,8 +3,9 @@
   <name>navigation</name>
   <version>1.0.0</version>
   <description>
-    Nav2 설정. nav2 본체는 apt(/opt/ros/humble)에서 오고, 여기에는 이 차량에
-    맞춰 실제로 손댄 파라미터·behavior tree·launch 만 들어 있다.
+    내비게이션 일체. 차량/센서 형상(URDF)과 TF, Nav2 파라미터·behavior tree,
+    그리고 맵을 담는다. nav2 본체는 apt(/opt/ros/humble)에서 오고 여기에는 이
+    차량에 맞춰 실제로 손댄 것만 들어 있다.
   </description>
   <maintainer email="hwkorea2011@gmail.com">shw</maintainer>
   <license>BSD</license>
@@ -15,6 +16,8 @@
   <exec_depend>nav2_map_server</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_common</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

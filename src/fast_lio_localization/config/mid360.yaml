@@ -15,8 +15,8 @@
         continuous_global_localization: false
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
-        # 3D prior map. bringup/maps 에 2D 점유맵과 함께 보관한다.
-        map_file_path: "/home/shw/hw/src/bringup/maps/output.pcd"
+        # 3D prior map. navigation/map 에 2D 점유맵과 함께 보관한다.
+        map_file_path: "/home/shw/hw/src/navigation/map/output.pcd"
 
         common:
             lid_topic:  "/livox_merge/merged_pointcloud"   # PointCloud2. 범용 포맷으로 통일

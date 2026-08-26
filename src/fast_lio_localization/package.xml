@@ -26,6 +26,8 @@
   <depend>common_interfaces</depend>
   <depend>tf2</depend>
   <depend>pcl_conversions</depend>
+  <!-- launch 기본값이 navigation/map 의 맵을 가리킨다 -->
+  <exec_depend>navigation</exec_depend>
   <depend>tf2_ros</depend>
   <depend>livox_ros_driver2</depend>
 
