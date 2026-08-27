@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Jetson 내장 CAN(mttcan) 으로 can0 를 올린다. hw motor_node / drive_set.py 용.
+#
+#   sudo tools/can_setup.sh up            # 모듈 로드 + can0 설정 + up
+#   sudo tools/can_setup.sh down
+#        tools/can_setup.sh status        # 링크 상태, 카운터, 버스 수신 테스트
+#   sudo tools/can_setup.sh install       # 부팅 시 자동 실행 (can0_setup.service)
+#
+# 비트레이트: 환경변수 CAN_BITRATE 또는 --bitrate N. 기본 1000000 (drive_set.py 와 동일).
+#   rbio TransferRobot 의 transfer-robot-can.service 는 250000 이다. 드라이버 설정과
+#   맞아야 하며, 틀리면 `status` 의 bus-error / error-warning 카운터가 올라간다.
+set -euo pipefail
+
+IFACE="${CAN_IFACE:-can0}"
+BITRATE="${CAN_BITRATE:-1000000}"
+RESTART_MS="${CAN_RESTART_MS:-100}"      # bus-off 자동 복구 지연
+TXQUEUELEN="${CAN_TXQUEUELEN:-1000}"     # 4축 PDO 50 Hz 송신 큐
+UNIT_NAME="can0_setup.service"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+
+ACTION="${1:-status}"
+shift || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bitrate) BITRATE="$2"; shift 2 ;;
+    --iface)   IFACE="$2";   shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+need_root() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "root 권한이 필요합니다: sudo $SCRIPT_PATH $ACTION" >&2
+    exit 1
+  fi
+}
+
+load_modules() {
+  # Jetson: mttcan (Tegra MTT CAN 컨트롤러). 다른 보드는 해당 드라이버로 바꾼다.
+  for m in can can_raw can_dev mttcan; do
+    if ! lsmod | grep -q "^${m}\b"; then
+      modprobe "$m" 2>/dev/null || echo "warn: modprobe $m 실패 (내장 커널이면 무시)" >&2
+    fi
+  done
+  if [[ ! -e "/sys/class/net/${IFACE}" ]]; then
+    echo "${IFACE} 장치가 없습니다. mttcan 드라이버/핀먹스(jetson-io) 를 확인하세요." >&2
+    exit 1
+  fi
+}
+
+can_up() {
+  need_root
+  load_modules
+  ip link set "$IFACE" down 2>/dev/null || true
+  ip link set "$IFACE" type can bitrate "$BITRATE" restart-ms "$RESTART_MS"
+  ip link set "$IFACE" txqueuelen "$TXQUEUELEN"
+  ip link set "$IFACE" up
+  echo "${IFACE} up: bitrate=${BITRATE} restart-ms=${RESTART_MS} txqueuelen=${TXQUEUELEN}"
+  ip -d link show "$IFACE" | sed -n 1,3p
+}
+
+can_down() {
+  need_root
+  ip link set "$IFACE" down 2>/dev/null && echo "${IFACE} down" || echo "${IFACE} 이미 down"
+}
+
+can_status() {
+  if [[ ! -e "/sys/class/net/${IFACE}" ]]; then
+    echo "${IFACE}: 장치 없음"; exit 1
+  fi
+  ip -d -s link show "$IFACE"
+  echo
+  local state
+  state="$(cat "/sys/class/net/${IFACE}/operstate" 2>/dev/null || echo unknown)"
+  echo "operstate: ${state}"
+  if command -v candump >/dev/null 2>&1 && [[ "$state" == "up" ]]; then
+    echo "2초간 버스 수신 (모터 드라이버가 켜져 있으면 TPDO 0x181~0x184 가 보여야 한다):"
+    timeout 2 candump -n 8 "$IFACE" 2>/dev/null || echo "  (수신 없음)"
+  else
+    echo "candump 없음 또는 링크 down. sudo apt install can-utils"
+  fi
+}
+
+can_install() {
+  need_root
+  cat > "/etc/systemd/system/${UNIT_NAME}" <<UNIT
+[Unit]
+Description=hw can0 setup (mttcan, ${BITRATE} bps)
+After=sys-subsystem-net-devices-${IFACE}.device
+Wants=sys-subsystem-net-devices-${IFACE}.device
+
+[Service]
+Type=oneshot
+Environment=CAN_IFACE=${IFACE}
+Environment=CAN_BITRATE=${BITRATE}
+Environment=CAN_RESTART_MS=${RESTART_MS}
+Environment=CAN_TXQUEUELEN=${TXQUEUELEN}
+ExecStart=${SCRIPT_PATH} up
+ExecStop=${SCRIPT_PATH} down
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now "${UNIT_NAME}"
+  systemctl --no-pager status "${UNIT_NAME}" | sed -n 1,5p
+  echo "설치됨: /etc/systemd/system/${UNIT_NAME} (bitrate ${BITRATE}). 변경은 다시 install."
+}
+
+case "$ACTION" in
+  up)      can_up ;;
+  down)    can_down ;;
+  status)  can_status ;;
+  install) can_install ;;
+  *) echo "usage: $0 {up|down|status|install} [--bitrate N] [--iface can0]" >&2; exit 2 ;;
+esac

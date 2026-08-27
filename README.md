@@ -158,9 +158,8 @@ manage_navigation_stack.sh start      hw bringup.launch.py 를 유닛으로 실�
                                        = 라이다 3대 + livox_merge + FAST-LIO + Nav2 + hw motor_node(/odom)
 ```
 
-1. CAN 서비스 설치 (한 번): `~/ros/TransferRobot/scripts/install_motor_autostart.sh`
-   - **비트레이트 확인 필수.** rbio 서비스는 `250000`, hw 의 `script/drive_set.py` 는 `1000000`
-     이다. 실차 드라이버 설정에 맞는 쪽을 쓴다 (`ip -d link show can0` 로 현재값 확인).
+1. CAN 설치 (한 번): `sudo ~/hw/tools/can_setup.sh install` (아래 "CAN" 절).
+   rbio 의 `install_motor_autostart.sh` 는 250 kbps 유닛을 깔므로 **둘 중 하나만** 쓴다.
 2. hw 빌드 (SDK 설치 포함, 아래 "빌드" 절).
 3. 기동:
    ```bash
@@ -271,8 +270,21 @@ ros2 launch navigation navigation_launch.py                 # Nav2
 ros2 run motor_node drive_set.py
 ros2 run motor_node homing_set.py
 ros2 run motor_node state_monitor.py
-cat ~/hw/src/motor_node/script/can_guide.txt              # can0 설정
 ```
+
+### CAN (Jetson mttcan)
+
+```bash
+sudo tools/can_setup.sh up                 # 모듈(can, can_raw, can_dev, mttcan) + can0 설정 + up
+tools/can_setup.sh status                  # 링크/카운터, candump 2초 수신 (TPDO 0x181~0x184)
+sudo tools/can_setup.sh install            # 부팅 자동 실행: /etc/systemd/system/can0_setup.service
+sudo tools/can_setup.sh install --bitrate 250000   # 드라이버가 250 kbps 면
+```
+
+기본 1 Mbps (`drive_set.py` 와 동일), `restart-ms 100` (bus-off 자동 복구), `txqueuelen 1000`.
+rbio 의 `transfer-robot-can.service` 는 250 kbps 다. 어느 쪽이 맞는지는 `status` 에서
+`bus-error` / `error-warning` 카운터가 올라가는지로 판단한다 — 비트레이트가 틀리면 수신 없이
+에러 카운터만 는다. `can0` 장치 자체가 없으면 `jetson-io` 로 CAN 핀먹스를 켜야 한다.
 
 ## motor_node (하부 구동)
 
