@@ -282,9 +282,36 @@ sudo tools/can_setup.sh install --bitrate 250000   # 드라이버가 250 kbps �
 ```
 
 기본 1 Mbps (`drive_set.py` 와 동일), `restart-ms 100` (bus-off 자동 복구), `txqueuelen 1000`.
-rbio 의 `transfer-robot-can.service` 는 250 kbps 다. 어느 쪽이 맞는지는 `status` 에서
-`bus-error` / `error-warning` 카운터가 올라가는지로 판단한다 — 비트레이트가 틀리면 수신 없이
-에러 카운터만 는다. `can0` 장치 자체가 없으면 `jetson-io` 로 CAN 핀먹스를 켜야 한다.
+rbio 의 `transfer-robot-can.service` 는 250 kbps 다. `can0` 장치 자체가 없으면 `jetson-io` 로
+CAN 핀먹스를 켜야 한다.
+
+**Jetson 은 외장 트랜시버가 필요하다.** `c310000.mttcan` 핀은 3.3V TTL 이라 SN65HVD230 /
+TCAN1042 같은 트랜시버를 거쳐야 버스에 붙는다. 트랜시버 STB/EN 이 뜬 상태면 통신이 안 된다.
+
+#### 통신이 안 될 때
+
+```bash
+tools/can_setup.sh errors                  # 에러프레임 "종류" 확인 (가장 유용)
+sudo tools/can_setup.sh selftest           # 루프백 자체진단 (버스 케이블 분리하고)
+sudo tools/can_setup.sh listen             # listen-only 로 엿듣기 (ACK/에러프레임 안 냄)
+```
+
+`status` 읽는 법:
+
+| 증상 | 해석 |
+|---|---|
+| `berr-counter` 0, 수신 없음 | 버스가 조용하다. 드라이버 전원/배선을 본다 |
+| `rx` 카운터가 순식간에 127 → `ERROR-PASSIVE`, 유효 프레임 0 | 라인에 신호는 있는데 디코드 불가. 비트레이트를 바꿔도 같으면 **버스 도미넌트 고착**(CAN_H/L 단락, 트랜시버 고착, 배선 오류) 쪽이다 |
+| `RX packets` 가 `error-warn`+`error-pass` 개수와 같다 | 그 패킷은 실제 데이터가 아니라 상태변화 에러프레임이다 (유효 수신 0) |
+| `ack` 에러만 난다 | 우리는 송신하는데 응답할 노드가 없다 |
+
+`errors` 의 에러프레임 종류로 갈린다: `stuff`/`form`/`crc` → 비트레이트·노이즈·종단저항,
+`bit0`/`bit1` → 배선/트랜시버, `ack` → 상대 노드 없음.
+
+배선 확인 (전원 끄고 멀티미터): CAN_H–CAN_L 저항이 **약 60 Ω** 이어야 한다 (양끝 120 Ω 병렬).
+120 Ω 이면 종단이 한쪽뿐, 수백 Ω 이상이면 종단 없음, 0 Ω 에 가까우면 단락이다.
+전원 켠 상태에서 GND 기준 전압은 유휴 시 CAN_H·CAN_L 둘 다 약 2.5 V 여야 한다.
+계속 3.5 V / 1.5 V 로 갈려 있으면 도미넌트 고착이다.
 
 ## motor_node (하부 구동)
 

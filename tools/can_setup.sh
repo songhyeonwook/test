@@ -5,6 +5,9 @@
 #   sudo tools/can_setup.sh down
 #        tools/can_setup.sh status        # 링크 상태, 카운터, 버스 수신 테스트
 #   sudo tools/can_setup.sh install       # 부팅 시 자동 실행 (can0_setup.service)
+#   sudo tools/can_setup.sh selftest      # 루프백 자체진단 (버스 케이블 분리하고)
+#        tools/can_setup.sh errors        # 에러프레임 종류 확인 (5초)
+#   sudo tools/can_setup.sh listen        # listen-only 로 엿듣기 (ACK 안 보냄)
 #
 # 비트레이트: 환경변수 CAN_BITRATE 또는 --bitrate N. 기본 1000000 (drive_set.py 와 동일).
 #   rbio TransferRobot 의 transfer-robot-can.service 는 250000 이다. 드라이버 설정과
@@ -81,6 +84,49 @@ can_status() {
   fi
 }
 
+# 컨트롤러 + 커널 경로만 검사한다. 트랜시버/배선은 보지 않으므로
+# 버스 케이블을 분리하고 돌리는 것이 안전하다.
+can_selftest() {
+  need_root
+  load_modules
+  command -v cansend >/dev/null 2>&1 || { echo "can-utils 필요: sudo apt install can-utils" >&2; exit 1; }
+  ip link set "$IFACE" down 2>/dev/null || true
+  ip link set "$IFACE" type can bitrate "$BITRATE" loopback on
+  ip link set "$IFACE" up
+  echo "loopback on (${BITRATE} bps). 자기 프레임이 되돌아오면 컨트롤러는 정상이다."
+  local out
+  out="$( { timeout 2 candump -n 1 "$IFACE" & sleep 0.3; cansend "$IFACE" 123#DEADBEEF; wait; } 2>&1 || true )"
+  echo "${out:-  (되돌아온 프레임 없음)}"
+  ip link set "$IFACE" down
+  ip link set "$IFACE" type can bitrate "$BITRATE" loopback off restart-ms "$RESTART_MS"
+  ip link set "$IFACE" up
+  echo "loopback off, ${IFACE} 정상 모드로 복귀"
+}
+
+# 에러프레임의 "종류" 를 본다. 원인 분류에 가장 유용하다.
+#   stuff/form/crc  -> 비트레이트 불일치, 노이즈, 종단 저항
+#   bit0/bit1       -> 배선/트랜시버 (도미넌트 고착 등)
+#   ack             -> 우리는 보내는데 아무도 응답 안 함 (상대 없음/속도 불일치)
+can_errors() {
+  command -v candump >/dev/null 2>&1 || { echo "can-utils 필요: sudo apt install can-utils" >&2; exit 1; }
+  echo "5초간 에러프레임 수집 (${IFACE}):"
+  timeout 5 candump -e "${IFACE},#FFFFFFFF" 2>/dev/null || echo "  (에러프레임 없음)"
+  echo
+  echo "카운터 변화:"; ip -s -d link show "$IFACE" | grep -A2 "re-started"
+}
+
+# listen-only: ACK/에러프레임을 버스에 내보내지 않는다. 남의 통신을 방해하지 않고
+# 엿들을 때, 그리고 우리 송신이 문제인지 가릴 때 쓴다.
+can_listen() {
+  need_root
+  load_modules
+  ip link set "$IFACE" down 2>/dev/null || true
+  ip link set "$IFACE" type can bitrate "$BITRATE" listen-only on
+  ip link set "$IFACE" up
+  echo "listen-only on (${BITRATE} bps). Ctrl-C 로 종료 후 'up' 으로 복귀."
+  candump "$IFACE" || true
+}
+
 can_install() {
   need_root
   cat > "/etc/systemd/system/${UNIT_NAME}" <<UNIT
@@ -109,9 +155,12 @@ UNIT
 }
 
 case "$ACTION" in
-  up)      can_up ;;
-  down)    can_down ;;
-  status)  can_status ;;
-  install) can_install ;;
-  *) echo "usage: $0 {up|down|status|install} [--bitrate N] [--iface can0]" >&2; exit 2 ;;
+  up)       can_up ;;
+  down)     can_down ;;
+  status)   can_status ;;
+  install)  can_install ;;
+  selftest) can_selftest ;;
+  errors)   can_errors ;;
+  listen)   can_listen ;;
+  *) echo "usage: $0 {up|down|status|install|selftest|errors|listen} [--bitrate N] [--iface can0]" >&2; exit 2 ;;
 esac
