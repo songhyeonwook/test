@@ -7,7 +7,7 @@ TF lookup 없이 토픽만 구독한다. camera_init / body 는 TF 프레임으�
         /map_to_odom  map -> camera_init 보정 (global_localization, 저주기)
 
   발행  map -> odom        planarize(map->camera_init)  보정(점프)을 흡수
-        odom -> base_link  나머지 연속 오도메트리
+        odom -> base_link  나머지 연속 오도메트리 (base_link = 지면 평면 프레임)
 
 body 는 차량 기준점이 아니라 옆으로 누운 상단 라이다의 IMU 프레임이라 그대로
 평면화하면 yaw 가 엉킨다. ref_from_body_* (body -> 차량 정렬 기준점, mid360.yaml)
@@ -38,8 +38,11 @@ class Tf2DBridge(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_topic', '/Odometry')
         self.declare_parameter('map_to_odom_topic', '/map_to_odom')
-        # map -> base_footprint 평면 자세를 Odometry 로도 낸다 (rbio 앱이 /localization 을
+        # map -> 지면 평면 자세를 Odometry 로도 낸다 (rbio 앱이 /localization 을
         # frame map / child base_footprint 로 요구). '' 이면 안 낸다.
+        # 주의: base_footprint 는 TF 트리에 없다(2026-08-27 에 base_link 로 합침).
+        # 아래 값은 앱 호환용 '메시지 라벨'일 뿐이고, 자세 자체는 base_link 와 같다.
+        # 앱이 base_link 를 받아들이면 이 파라미터를 base_link 로 바꾸면 된다.
         self.declare_parameter('localization_topic', '/localization')
         self.declare_parameter('footprint_frame', 'base_footprint')
         # body(IMU) 에서 본 차량 정렬 기준점.
@@ -187,7 +190,7 @@ class Tf2DBridge(Node):
         self.tf_broadcaster.sendTransform(t)
 
     def publish_localization(self, M_map_base, stamp):
-        """map -> base_footprint 평면 자세. base_link 와 xy/yaw 는 같고 z=0."""
+        """map -> 지면(base_link) 평면 자세. child_frame_id 만 앱 호환 라벨이다."""
         if self.pub_localization is None:
             return
         yaw = self.yaw_from_matrix(M_map_base)

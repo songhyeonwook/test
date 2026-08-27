@@ -2,16 +2,22 @@
 <!--
   차량과 센서 형상. 내비게이션이 쓰는 2D 체인 아래에 붙는다.
 
-    map ── odom ── base_link ── base_footprint ── livox_frame ─┬─ livox_top ── imu_link
-                                (지면)            (라이다 중심) ├─ livox_front
-                                                               └─ livox_rear
+    map ── odom ── base_link ── livox_frame ─┬─ livox_top ── imu_link
+                     (지면)     (라이다 중심)  ├─ livox_front
+                                              └─ livox_rear
 
   map->odom, odom->base_link 은 tf_2d.py 가 낸다. base_link 는 이 URDF 의
   루트이므로 여기서는 발행하지 않는다(부모가 둘이 되면 TF 가 깨진다).
 
-  base_link 는 tf_2d.py 의 planarize() 가 z 를 0 으로 눌러 만드는 평면 프레임이라
-  지면이 아니다. 지면은 그보다 ground_drop(0.5m) 아래이고, base_footprint 가
-  REP-120 대로 거기에 놓인다. 따라서 base_footprint 기준 z 는 곧 지면 위 높이다.
+  base_link 는 tf_2d.py 의 planarize() 가 z 를 0 으로 눌러 만드는 평면 프레임이고,
+  동시에 지면 프레임이다. 즉 base_link 기준 z 는 곧 지면 위 높이이고, 라이다
+  extrinsic / 슬라이스 z / costmap 장애물 높이가 전부 이 하나의 원점을 쓴다.
+  (예전에는 base_link 를 지면보다 0.5m 위에 두고 base_footprint 를 따로 뒀는데,
+   기준이 둘로 갈려 파라미터마다 -0.5 보정이 붙었다. 2026-08-27 에 합쳤다.)
+
+  주의: 사전지도 PCD 의 바닥면은 map z ≈ -0.385 에 있다. planarize() 가 z=0 을
+  강제하므로 RViz 에서 3D prior map 을 겹쳐 보면 차량이 지도 바닥보다 그만큼
+  떠 보인다. 표시상의 차이일 뿐 x/y/yaw 와 costmap 높이 필터에는 영향이 없다.
 
   livox_frame 은 세 라이다를 묶는 중심 프레임으로, front/rear 의 중점이다.
   (드라이버가 클라우드에 찍는 frame_id 는 livox_top/front/rear 이고
@@ -41,26 +47,20 @@
     </joint>
   </xacro:macro>
 
-  <!-- tf_2d.py 가 내보내는 평면화된 차량 프레임 (z 는 지면이 아니다) -->
-  <link name="base_link"/>
-
-  <!-- 지면 투영점. 차체와 센서를 매다는 자리이고, 여기 기준 z = 지면 위 높이. -->
-  <link name="base_footprint">
+  <!-- tf_2d.py 가 내보내는 평면화된 차량 프레임이자 지면 프레임.
+       차체와 센서를 매다는 자리이고, 여기 기준 z = 지면 위 높이다. -->
+  <link name="base_link">
     <visual>
       <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
       <origin xyz="0 0 ${body_height/2}"/>
       <material name="grey"/>
     </visual>
   </link>
-  <joint name="base_link_to_base_footprint" type="fixed">
-    <parent link="base_link"/><child link="base_footprint"/>
-    <origin xyz="0 0 ${-ground_drop}" rpy="0 0 0"/>
-  </joint>
 
   <!-- 세 라이다를 묶는 중심 프레임. front/rear 의 중점이다. -->
   <link name="livox_frame"/>
-  <joint name="base_footprint_to_livox_frame" type="fixed">
-    <parent link="base_footprint"/><child link="livox_frame"/>
+  <joint name="base_link_to_livox_frame" type="fixed">
+    <parent link="base_link"/><child link="livox_frame"/>
     <origin xyz="${livox_frame_xyz}" rpy="0 0 0"/>
   </joint>
 

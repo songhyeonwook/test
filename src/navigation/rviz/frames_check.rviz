@@ -50,7 +50,7 @@ Visualization Manager:
       Decay Time: 0
   Global Options:
     Background Color: 30; 30; 35
-    Fixed Frame: base_footprint
+    Fixed Frame: base_link
     Frame Rate: 30
   Tools:
     - Class: rviz_default_plugins/MoveCamera

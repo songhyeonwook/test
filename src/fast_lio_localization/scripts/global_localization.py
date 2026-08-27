@@ -135,7 +135,7 @@ class GlobalLocalizationNode(Node):
         else:
             self.get_logger().info('Received initial /initialpose, starting global localization.')
 
-        # /initialpose 는 차량(base_footprint, roll=pitch=0) 자세다. FAST-LIO 의
+        # /initialpose 는 차량(base_link=지면, roll=pitch=0) 자세다. FAST-LIO 의
         # body 는 옆으로 누운 IMU 프레임이므로 ref_from_body 를 끼워서
         # map->camera_init 초기 추정을 만든다. 이걸 빼면(옛 TF 시절 코드) 초기
         # 추정이 roll 90도 틀려서 ICP 가 바닥/천장이 뒤집힌 해로 수렴한다.

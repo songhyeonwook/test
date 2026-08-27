@@ -48,24 +48,24 @@
             fov_degree:    360.0
             det_range:     100.0
             extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
-            # 입력 클라우드는 livox_merge 가 base_footprint 로 보낸 것이고,
+            # 입력 클라우드는 livox_merge 가 base_link 로 보낸 것이고,
             # IMU 는 livox_top 안에 있다. 그래서 이 값은 한 대짜리 MID-360 의
-            # 공장 오프셋이 아니라 base_footprint -> IMU 전체 변환이다.
-            #   inverse( T(base_footprint<-livox_frame) * T(livox_frame<-livox_top)
+            # 공장 오프셋이 아니라 base_link -> IMU 전체 변환이다.
+            #   inverse( T(base_link<-livox_frame) * T(livox_frame<-livox_top)
             #            * T(livox_top<-IMU) )
-            # base_footprint 는 지면에 있다. 아래 ref_from_body_* 는 base_link
-            # (지면보다 0.5m 위) 기준이라 y 성분이 0.5 만큼 다르다 - 같은 값이
-            # 아니므로 한쪽만 보고 복사하지 말 것.
+            # base_link 가 곧 지면이다. 아래 ref_from_body_* 와 같은 변환이므로
+            # 두 값은 항상 같아야 한다 (한쪽만 고치면 check_frames.py 가 잡는다).
             extrinsic_T: [ 0.0, 1.32321, -0.23088 ]
             extrinsic_R: [ -1., 0., 0.,
                             0., 0., -1.,
                             0., -1., 0.]
 
         # tf_2d_bridge: body(IMU) 에서 본 base_link (tf_2d 가 실제로 발행하는
-        # 프레임). 회전은 위 extrinsic_R 과 같고 평행이동만 다르다.
+        # 프레임). 위 extrinsic_T/R 과 같은 변환이다 (base_link = 지면 = 병합
+        # 클라우드 프레임). rpy 로 적을 뿐 값은 동일하다.
         #   inverse( T(base_link<-...<-IMU) )
         # 한쪽을 바꾸면 반드시 tools/check_frames.py 로 정합을 확인할 것.
-        ref_from_body_xyz: [ 0.0, 0.82321, -0.23088 ]
+        ref_from_body_xyz: [ 0.0, 1.32321, -0.23088 ]
         ref_from_body_rpy: [ -1.5707963267948966, 0.0, -3.141592653589793 ]  # -pi/2 0 -pi
 
         publish:

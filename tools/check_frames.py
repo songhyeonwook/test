@@ -8,10 +8,9 @@
   src/fast_lio_localization/config/mid360.yaml  병합클라우드->IMU extrinsic,
                                                + tf_2d 의 ref_from_body_*
 
-주의: base_footprint 는 지면, base_link 는 그보다 ground_drop(0.5m) 위다.
-  - livox_merge extrinsic / FAST-LIO extrinsic_T  -> base_footprint 기준
-  - tf_2d 의 ref_from_body_*                      -> base_link 기준
-둘은 더 이상 같은 값이 아니다.
+주의: base_link 가 곧 지면 프레임이다 (2026-08-27 에 base_footprint 를 없애고 합침).
+livox_merge extrinsic / FAST-LIO extrinsic_T / tf_2d 의 ref_from_body_* 가 전부
+base_link 기준이라, extrinsic_T 와 ref_from_body_xyz 는 같은 값이어야 한다.
 
 한 곳만 고치고 나머지를 안 고치면 조용히 어긋난다. 값을 만질 때마다 돌릴 것.
 
@@ -94,18 +93,20 @@ def main():
 
     # ---- 트리 구조 자체의 약속 ----
     print("TF 트리 구조")
-    bf_from_bl = pose('base_footprint', 'base_link')
-    drop = -bf_from_bl[2, 3]
-    flat = np.allclose(bf_from_bl[:3, :3], np.eye(3), atol=1e-9) and \
-        np.allclose(bf_from_bl[:2, 3], 0, atol=1e-9)
-    ok &= flat
-    print(f"  [{'OK' if flat else '불일치'}] base_footprint 는 base_link 바로 아래"
-          f" (지면까지 {drop:.3f} m, 회전/xy 오프셋 없음)")
+    gone = 'base_footprint' not in parent_of and \
+        'base_footprint' not in set(parent_of.values())
+    ok &= gone
+    print(f"  [{'OK' if gone else '불일치'}] base_footprint 없음 "
+          f"(base_link 하나가 지면 프레임)")
+    root_ok = parent_of.get('livox_frame') == 'base_link'
+    ok &= root_ok
+    print(f"  [{'OK' if root_ok else '불일치'}] livox_frame 의 부모 = "
+          f"{parent_of.get('livox_frame')} (base_link 이어야 함)")
 
     # livox_frame 은 front/rear 의 중점이어야 한다
-    f_bf = pose('livox_front', 'base_footprint')[:3, 3]
-    r_bf = pose('livox_rear', 'base_footprint')[:3, 3]
-    lf_bf = pose('livox_frame', 'base_footprint')[:3, 3]
+    f_bf = pose('livox_front', 'base_link')[:3, 3]
+    r_bf = pose('livox_rear', 'base_link')[:3, 3]
+    lf_bf = pose('livox_frame', 'base_link')[:3, 3]
     check("livox_frame == livox_front/livox_rear 의 중점", lf_bf, (f_bf + r_bf) / 2)
 
     # 세 라이다가 모두 livox_frame 에 매달려 있어야 한다
@@ -116,24 +117,24 @@ def main():
               f"{parent_of.get(lid)} (livox_frame 이어야 함)")
 
     # ---- livox_merge ----
-    print("\nlivox_merge extrinsics vs URDF (base_footprint 기준)")
+    print("\nlivox_merge extrinsics vs URDF (base_link=지면 기준)")
     for path in MERGE_CFGS:
         cfg = yaml.safe_load(open(path))
         cfg = cfg.get('merge_lidar_node', cfg.get('/**'))['ros__parameters']
         print(f"  {path}")
         for key, link in [('lidar_0', 'livox_front'), ('lidar_1', 'livox_rear')]:
             M = np.array(cfg[f'lidars.extrinsics.{key}']).reshape(4, 4)
-            check(f"  {key} <-> base_footprint<-{link}", M,
-                  pose(link, 'base_footprint'))
+            check(f"  {key} <-> base_link<-{link}", M,
+                  pose(link, 'base_link'))
         frame = cfg.get('output.frame_id')
         if frame is not None:
-            good = frame == 'base_footprint'
+            good = frame == 'base_link'
             ok &= good
             print(f"    [{'OK' if good else '불일치'}] output.frame_id = {frame}")
 
-    # ---- FAST-LIO: 병합클라우드(base_footprint) 를 IMU 에서 본 값 ----
-    imu_bf = np.linalg.inv(pose('imu_link', 'base_footprint'))
-    print("\nFAST-LIO extrinsic vs URDF (base_footprint <- IMU 의 역변환)")
+    # ---- FAST-LIO: 병합클라우드(base_link=지면) 를 IMU 에서 본 값 ----
+    imu_bf = np.linalg.inv(pose('imu_link', 'base_link'))
+    print("\nFAST-LIO extrinsic vs URDF (base_link <- IMU 의 역변환)")
     f = 'src/fast_lio_localization/config/mid360.yaml'
     txt = open(f).read()
     T = [float(v) for v in re.search(r'extrinsic_T:\s*\[([^\]]+)\]', txt).group(1).split(',')]
@@ -142,7 +143,7 @@ def main():
     check(f"{f} extrinsic_T", T, imu_bf[:3, 3])
     check(f"{f} extrinsic_R", R, imu_bf[:3, :3])
 
-    # ---- tf_2d: base_link 기준 (지면이 아니다) ----
+    # ---- tf_2d: base_link(=지면) 기준. extrinsic_T 와 같은 값이어야 한다 ----
     imu_bl = np.linalg.inv(pose('imu_link', 'base_link'))
     print("\ntf_2d ref_from_body (body -> base_link) vs URDF")
     loc = yaml.safe_load(open(f))['/**']['ros__parameters']
@@ -150,12 +151,16 @@ def main():
     M[:3, :3] = rot(loc['ref_from_body_rpy'])
     M[:3, 3] = loc['ref_from_body_xyz']
     check("mid360.yaml ref_from_body", M, imu_bl)
+    same = np.allclose(T, loc['ref_from_body_xyz'], atol=1e-6)
+    ok &= same
+    print(f"  [{'OK' if same else '불일치'}] extrinsic_T == ref_from_body_xyz "
+          f"(둘 다 base_link<-IMU 라 같아야 한다)")
 
     print(f"\n참고: front+rear xy(livox_frame 기준) = "
           f"{np.round((pose('livox_front', 'livox_frame')[:3, 3] + pose('livox_rear', 'livox_frame')[:3, 3])[:2], 4).tolist()}"
           f"  (0 이면 원점대칭)")
     print("참고: 지면 위 라이다 높이 = " + ", ".join(
-        f"{n} {pose(n, 'base_footprint')[2, 3]:.4f} m"
+        f"{n} {pose(n, 'base_link')[2, 3]:.4f} m"
         for n in ['livox_front', 'livox_rear', 'livox_top']))
 
     print("\n=> " + ("전부 일치" if ok else "불일치 있음"))

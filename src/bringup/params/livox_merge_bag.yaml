@@ -16,7 +16,7 @@
       - "/livox/lidar_192_168_2_102"   # lidar_0 = livox_front
       - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
 
-    lidars.extrinsics.lidar_0:   # base_footprint(지면) <- livox_front
+    lidars.extrinsics.lidar_0:   # base_link(지면) <- livox_front
       - 0.000000
       - -1.000000
       - 0.000000
@@ -34,7 +34,7 @@
       - 0.000000
       - 1.000000
 
-    lidars.extrinsics.lidar_1:   # base_footprint(지면) <- livox_rear
+    lidars.extrinsics.lidar_1:   # base_link(지면) <- livox_rear
       - 0.000000
       - 1.000000
       - 0.000000
@@ -55,4 +55,4 @@
     output.pointcloud2: "/livox_merge/merged_pointcloud"
     output.livox_custom: "/livox_merge/merged_livox"
     output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
-    output.frame_id: "base_footprint"
+    output.frame_id: "base_link"

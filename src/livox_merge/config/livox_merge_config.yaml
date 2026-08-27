@@ -1,8 +1,8 @@
 merge_lidar_node:
   ros__parameters:
     sync_frequency: 20.0
-    # sliced 출력 = nav2 costmap 의 장애물 입력 (base_footprint 기준 z 대역).
-    # base_footprint 가 지면에 있으므로 이 z 는 그대로 "지면 위 높이"다.
+    # sliced 출력 = nav2 costmap 의 장애물 입력 (base_link 기준 z 대역).
+    # base_link 가 지면에 있으므로 이 z 는 그대로 "지면 위 높이"다.
     # z_min 0.15 = 지면 위 15cm. 더 낮추면 바닥 반사가 장애물로 찍힌다.
     slice_z_min: 0.15
     slice_z_max: 2.3
@@ -15,7 +15,7 @@ merge_lidar_node:
       - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
       # livox_top(192.168.1.135)은 병합 안함.
 
-    lidars.extrinsics.lidar_0:   # base_footprint(지면) <- livox_front
+    lidars.extrinsics.lidar_0:   # base_link(지면) <- livox_front
       - 0.000000
       - -1.000000
       - 0.000000
@@ -34,7 +34,7 @@ merge_lidar_node:
       - 1.000000
 
 
-    lidars.extrinsics.lidar_1:   # base_footprint(지면) <- livox_rear
+    lidars.extrinsics.lidar_1:   # base_link(지면) <- livox_rear
       - 0.000000
       - 1.000000
       - 0.000000
@@ -56,4 +56,4 @@ merge_lidar_node:
     output.pointcloud2: "/livox_merge/merged_pointcloud"
     output.livox_custom: "/livox_merge/merged_livox"
     output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
-    output.frame_id: "base_footprint"   # 위 extrinsic 이 실제로 보내는 프레임(지면 기준)
+    output.frame_id: "base_link"   # 위 extrinsic 이 실제로 보내는 프레임(지면 기준)

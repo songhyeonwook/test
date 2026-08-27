@@ -59,14 +59,20 @@ MID-360 top ─┬─── /livox/imu_192_168_1_135 ─────────
 TF 트리 (단일 체인):
 
 ```
-map ── odom ── base_link ── base_footprint ── livox_frame ─┬─ livox_top ── imu_link
-               (tf_2d)      (지면)            (라이다 중심) ├─ livox_front
-                                                           └─ livox_rear
+map ── odom ── base_link ── livox_frame ─┬─ livox_top ── imu_link
+               (tf_2d, 지면)  (라이다 중심)  ├─ livox_front
+                                            └─ livox_rear
 ```
 
 * `map->odom`, `odom->base_link` 는 `tf_2d.py` 가 낸다. `base_link` 는 z 를 0 으로
-  누른 평면 프레임이고, `base_footprint` 는 그 0.5 m 아래 **지면**(REP-120)이다.
-  차량 모델과 센서는 전부 `base_footprint` 아래에 있다.
+  누른 평면 프레임이자 **지면 프레임**이다. 차량 모델과 센서는 전부 `base_link`
+  아래에 있고, `base_link` 기준 z 가 곧 지면 위 높이다.
+  (예전에는 `base_link` 를 지면 0.5 m 위에 두고 `base_footprint` 를 따로 뒀는데,
+  기준이 둘로 갈려 파라미터마다 -0.5 보정이 붙어서 2026-08-27 에 합쳤다.
+  `/localization` 토픽의 `child_frame_id` 만 앱 호환을 위해 문자열로 남겨 뒀다.)
+* 사전지도 PCD 의 바닥면은 `map` z ≈ -0.385 에 있는데 `planarize()` 가 z=0 을
+  강제하므로, RViz 에서 3D prior map 을 겹쳐 보면 차량이 그만큼 떠 보인다.
+  x/y/yaw 와 costmap 높이 필터에는 영향이 없다 (지도를 다시 만들 때 정리할 것).
 * FAST-LIO 의 `camera_init` / `body` 는 **TF 에 올리지 않는다.** `body` 는 차량
   기준점이 아니라 상단 라이다 안에서 옆으로 누운 **IMU 프레임**이라, 그대로
   평면화하면 yaw 가 엉킨다. body -> base_link 변환은
@@ -75,10 +81,11 @@ map ── odom ── base_link ── base_footprint ── livox_frame ─┬
   RViz 에서 camera_init 프레임 토픽(`/cloud_registered` 등)을 보고 싶을 때만
   `localization.launch.py debug_tf:=true`.
 * 같은 기하가 세 곳에 있다: `mount.xacro`(원본), `livox_merge` 의 extrinsic
-  (base_footprint 기준), `mid360.yaml` 의 `extrinsic_T/R`(base_footprint -> IMU)
+  (base_link 기준), `mid360.yaml` 의 `extrinsic_T/R`(base_link -> IMU)
   와 `ref_from_body_*`(IMU -> base_link). 센서 위치를 바꾸면 `mount.xacro` 만
   고친 뒤 `python3 tools/check_frames.py` 로 나머지와의 정합을 확인한다.
-  **extrinsic_T 와 ref_from_body 는 기준 프레임이 달라 같은 값이 아니다.**
+  **이제 기준 프레임이 같아 `extrinsic_T` 와 `ref_from_body_xyz` 는 같은 값이다**
+  (check_frames.py 가 이것도 검사한다).
 
 ---
 
@@ -210,8 +217,10 @@ rbio 의 `manage_motor_node.sh` 는 rbio 쪽 `install/motor_node` 가 없으면 
   상세에 `[ACKERMANN]` 처럼 hw 모드명이 붙는다.
 * `motor_node/set_docking_mode`(SetBool): true → 디프, false → 애커만. `/mode` 와 같은 상태머신.
 * `docking/cmd_vel`: 디프 모드 전용, rbio 부호(`linear.x` + = 우측 횡이동 → 내부 `v_lat = -x`).
-* `/localization`: `tf_2d.py` 가 map → **base_footprint** 평면 자세로 낸다 (앱이 이 프레임을
-  검사). transform_fusion 의 3D(map → body) 출력은 `/localization_3d` 로 옮겼다.
+* `/localization`: `tf_2d.py` 가 map → 지면 평면 자세로 낸다. `child_frame_id` 는 앱 호환을
+  위해 `base_footprint` 문자열을 유지하지만 TF 트리에는 그 프레임이 없다(= `base_link`).
+  바꾸려면 `tf_2d` 의 `footprint_frame` 파라미터.
+  transform_fusion 의 3D(map → body) 출력은 `/localization_3d` 로 옮겼다.
 * behavior_server 에 `backup`, `drive_on_heading` 추가 (앱이 도킹 접근·후퇴에 직접 호출).
 * `tools/rbio_env.sh` 의 `TRANSFER_ROBOT_LIDAR_*` 가 앱의 장애물/도킹 인식 좌표를 hw extrinsic 에 맞춘다.
 
@@ -439,7 +448,7 @@ ros2 launch navigation navigation_launch.py use_sim_time:=true   # Nav2 까지 �
 ```bash
 python3 tools/check_frames.py                            # URDF <-> 설정 정합 (값 바꿀 때마다)
 rviz2 -d src/navigation/rviz/frames_check.rviz           # 모델과 클라우드 겹쳐보기
-ros2 run tf2_ros tf2_echo map base_footprint             # z = -0.5, camera_init 은 없어야 정상
+ros2 run tf2_ros tf2_echo map base_link                  # z = 0(지면), camera_init 은 없어야 정상
 ros2 run tf2_tools view_frames
 ros2 topic hz /livox_merge/merged_pointcloud_sliced      # 10 Hz
 ```
