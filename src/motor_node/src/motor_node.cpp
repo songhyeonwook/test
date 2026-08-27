@@ -2,11 +2,13 @@
 //
 //  - 주행 ID 1/3 : Profile Velocity(mode 3), 0x60FF 로 속도 명령
 //  - 조향 ID 2/4 : Profile Position(mode 1), 0x607A 로 목표 각도 명령
+//                  JOY(mode 3) 에서만 Profile Velocity(3), 0x60FF 로 각속도 명령
 //  - 조향은 New set-point(bit4) / ACK(bit12) 핸드셰이크로 확실히 갱신한다
 //  - 시동 시 Fault reset 후 조향축을 0 도로 센터링하고 mode 0(정렬)에서 대기한다
 //
 // 토픽
-//   /mode                          std_msgs/Int32  0=재정렬, 1=애커만(4WS 역위상), 2=디프
+//   /mode                          std_msgs/Int32  0=재정렬, 1=애커만(4WS 역위상), 2=디프,
+//                                                  3=조이스틱 수동(조향 속도제어)
 //   /cmd_vel                       geometry_msgs/Twist
 //   /odom                          nav_msgs/Odometry           (발행)
 //   /steer_angle_deg               std_msgs/Float32MultiArray  (발행)
@@ -25,11 +27,21 @@
 // motor_node/drive_mode 의 상태 토큰은 rbio 앱이 아는 이름으로 낸다:
 //   ACKERMANN -> AUTONOMOUS, DIFF -> DOCKING, 전환 중 -> ENTERING_DOCKING / EXITING_DOCKING,
 //   ALIGN -> ALIGN (앱은 준비 안 됨으로 봄), 실패 -> FAILED. 상세에 hw 모드명을 같이 적는다.
-// startup_mode (0/1/2) 를 주면 시동 센터링 뒤 자동으로 그 모드로 들어간다 (앱 모드: 1).
+// startup_mode (0/1/2/3) 를 주면 시동 센터링 뒤 자동으로 그 모드로 들어간다 (앱 모드: 1).
 //
-// 모드 전환: 주행이 완전히 멈춘 뒤 조향을 목표 각도(정렬/애커만=0도, 디프=diff_steer_deg)
+// 모드 전환: 주행이 완전히 멈춘 뒤 조향을 목표 각도(정렬/애커만=0도,
+//   디프=전륜 -diff_steer_deg / 후륜 +diff_steer_deg)
 //   로 돌리고, 도달하면 모드가 활성화된다. 디프 모드는 cmd_vel 의 linear.x(또는 y) 를
 //   횡이동, angular.z 를 제자리 회전으로 해석한다.
+//
+// JOY(3) 조이스틱 수동: 바퀴 방향 규칙은 애커만과 같다(전/후륜 역위상, 두 구동축 같은 부호).
+//   다른 점은 조향을 각도가 아니라 각속도로 준다는 것뿐이다. 진입할 때 조향축을 0 도로
+//   센터링한 뒤 ID 2/4 를 Profile Velocity(0x6060=3, RPDO->0x60FF) 로 바꾸고, 빠져나갈
+//   때 Profile Position 으로 되돌린다. cmd_vel 해석:
+//     linear.x  = 주행 속도 [m/s]  (앞뒤 구동축 같은 값 = 애커만과 같은 회전 방향)
+//     angular.z = 조향 각속도. 풀 스케일(|angular.z| = max_angular_vel)에서
+//                 joy_steer_rate_deg_s [deg/s] 가 나오도록 정규화한다.
+//   조향 한계(max_steering_angle_deg)에 닿으면 더 밀어넣는 방향만 0 으로 막는다.
 //
 // ── 오도메트리 (모드 무관 단일 모델) ─────────────────────────────
 //   전/후 축을 각각 조향 가능한 2축 플랫폼으로 보고, 측정된 조향각과 측정된
@@ -186,6 +198,13 @@ class MotorNode : public rclcpp::Node
         steering_profile_deceleration_ = std::clamp(
             static_cast<int>(this->declare_parameter<int>("steering_profile_deceleration", 40000)),
             1000, 200000);
+        // --- 주행 프로파일 (0x6083/0x6084). 가속과 감속을 따로 준다. ---
+        drive_profile_acceleration_ = std::clamp(
+            static_cast<int>(this->declare_parameter<int>("drive_profile_acceleration", 20000)),
+            1000, 200000);
+        drive_profile_deceleration_ = std::clamp(
+            static_cast<int>(this->declare_parameter<int>("drive_profile_deceleration", 20000)),
+            1000, 200000);
         max_steering_angle_rad_ =
             std::clamp(this->declare_parameter<double>("max_steering_angle_deg", MAX_STEER_DEG),
                        30.0, 85.0) *
@@ -211,9 +230,19 @@ class MotorNode : public rclcpp::Node
         diff_max_angular_vel_ =
             std::max(0.0, this->declare_parameter<double>("diff_max_angular_vel", 0.0));
         diff_lateral_ = this->declare_parameter<bool>("diff_linear_x_is_lateral", true);
+
+        // --- JOY 모드 (조이스틱 수동) ---
+        //   조향은 각도가 아니라 각속도 지령이다. 스틱 풀 스케일에서 나올 조향 속도와,
+        //   수동 주행용 별도 속도 상한(0 이면 전역 max_linear_vel 을 쓴다).
+        joy_steer_rate_deg_s_ =
+            std::clamp(this->declare_parameter<double>("joy_steer_rate_deg_s", 20.0), 1.0, 60.0);
+        joy_max_linear_vel_ =
+            std::max(0.0, this->declare_parameter<double>("joy_max_linear_vel", 0.0));
+        joy_stick_deadzone_ =
+            std::clamp(this->declare_parameter<double>("joy_stick_deadzone", 0.05), 0.0, 0.5);
         // 시동 센터링 뒤 자동 진입할 모드. 0 = /mode 를 기다린다 (단독 테스트), 1 = 애커만 (rbio 앱 모드)
         startup_mode_ =
-            std::clamp(static_cast<int>(this->declare_parameter<int>("startup_mode", 0)), 0, 2);
+            std::clamp(static_cast<int>(this->declare_parameter<int>("startup_mode", 0)), 0, 3);
 
         // --- 오도메트리 ---
         odom_frame_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
@@ -269,10 +298,12 @@ class MotorNode : public rclcpp::Node
             this->create_wall_timer(250ms, std::bind(&MotorNode::publish_diagnostics, this));
         RCLCPP_INFO(this->get_logger(),
                     "4WS motor driver configured; startup centering queued "
-                    "(max_v=%.2f m/s, max_w=%.2f rad/s, max_steer=%.1f deg, diff=%.1f deg, "
-                    "odom_tf=%s)",
+                    "(max_v=%.2f m/s, max_w=%.2f rad/s, max_steer=%.1f deg, diff F/R=%.1f/%.1f deg, "
+                    "drive acc/dec=%d/%d, steer acc/dec=%d/%d, odom_tf=%s)",
                     max_linear_vel_, max_angular_vel_, max_steering_angle_rad_ * RAD2DEG,
-                    diff_steer_deg_, publish_odom_tf_ ? "on" : "off");
+                    diff_front_deg(), diff_rear_deg(), drive_profile_acceleration_,
+                    drive_profile_deceleration_, steering_profile_acceleration_,
+                    steering_profile_deceleration_, publish_odom_tf_ ? "on" : "off");
     }
 
     ~MotorNode()
@@ -281,6 +312,9 @@ class MotorNode : public rclcpp::Node
             return;
         send_drive_pdo(ID_FRONT_DRIVE, 0, 0x000F);
         send_drive_pdo(ID_REAR_DRIVE, 0, 0x000F);
+        // JOY(PV) 로 종료되면 조향축이 마지막 속도로 계속 돈다. PP 일 때는 위치 0 지령이
+        // 되어버리므로 stop_steering_velocity() 안에서 PV 인 경우에만 나간다.
+        stop_steering_velocity();
         usleep(20000);
         send_nmt_command(0x81, 0);
         close(can_sock_);
@@ -311,7 +345,7 @@ class MotorNode : public rclcpp::Node
     };
 
     // /mode 값과 1:1
-    enum class Mode : int { ALIGN = 0, ACKERMANN = 1, DIFF = 2 };
+    enum class Mode : int { ALIGN = 0, ACKERMANN = 1, DIFF = 2, JOY = 3 };
 
     int can_sock_ = -1;
     double cmd_vx_ = 0.0, cmd_vy_ = 0.0, cmd_wz_ = 0.0;
@@ -370,6 +404,8 @@ class MotorNode : public rclcpp::Node
     int steering_profile_velocity_ = 40000;
     int steering_profile_acceleration_ = 40000;
     int steering_profile_deceleration_ = 40000;
+    int drive_profile_acceleration_ = 20000;
+    int drive_profile_deceleration_ = 20000;
     double max_steering_angle_rad_ = MAX_STEER_DEG * DEG2RAD;
     double max_linear_vel_ = 0.2;
     double max_angular_vel_ = 0.3;
@@ -380,7 +416,16 @@ class MotorNode : public rclcpp::Node
     double diff_max_linear_vel_ = 0.0;
     double diff_max_angular_vel_ = 0.0;
     bool diff_lateral_ = true;
+    double joy_steer_rate_deg_s_ = 20.0;
+    double joy_max_linear_vel_ = 0.0;
+    double joy_stick_deadzone_ = 0.05;
     int startup_mode_ = 0;
+
+    // 조향축(ID 2/4)의 현재 0x6060 값. 1 = Profile Position, 3 = Profile Velocity(JOY).
+    int steering_op_mode_ = 1;
+    // 0x6060 전환 직후에는 드라이브가 Operation Enabled 로 돌아올 때까지 시간이 걸린다.
+    // 그 사이의 "not operational" 은 실패가 아니라 대기로 본다.
+    std::chrono::steady_clock::time_point steering_mode_settle_deadline_{};
 
     std::string odom_frame_ = "odom";
     std::string base_frame_ = "base_link";
@@ -396,6 +441,7 @@ class MotorNode : public rclcpp::Node
     static constexpr int SETPOINT_RETRY_CYCLES = 50;
     static constexpr int32_t SETPOINT_STALL_PULSES = 1000;
     static constexpr int MODE_TRANSITION_TIMEOUT_MS = 30000;
+    static constexpr int STEERING_MODE_SETTLE_MS = 1000;
     static constexpr double DRIVE_STOPPED_TOLERANCE_MPS = 0.01;
     static constexpr double RECOVERY_ZERO_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
     static constexpr double DRIVE_STEERING_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
@@ -558,8 +604,8 @@ class MotorNode : public rclcpp::Node
             send_sdo_write(id, 0x6084, 0, steering_profile_deceleration_, 4);
         } else {
             // 주행 모터 설정
-            send_sdo_write(id, 0x6083, 0, 20000, 4);
-            send_sdo_write(id, 0x6084, 0, 20000, 4);
+            send_sdo_write(id, 0x6083, 0, drive_profile_acceleration_, 4);
+            send_sdo_write(id, 0x6084, 0, drive_profile_deceleration_, 4);
             send_sdo_write(id, OD_TARGET_VEL, 0, 0, 4);
         }
         send_sdo_write(id, OD_CONTROL_WORD, 0, 0x0006, 2);
@@ -594,6 +640,8 @@ class MotorNode : public rclcpp::Node
             return "ACKERMANN";
         case Mode::DIFF:
             return "DIFF";
+        case Mode::JOY:
+            return "JOY";
         }
         return "ALIGN";
     }
@@ -603,13 +651,20 @@ class MotorNode : public rclcpp::Node
     {
         if (failed_)
             return "FAILED";
-        if (transitioning_)
-            return target_mode_ == Mode::DIFF ? "ENTERING_DOCKING" : "EXITING_DOCKING";
+        if (transitioning_) {
+            if (target_mode_ == Mode::DIFF)
+                return "ENTERING_DOCKING";
+            // JOY 는 앱이 모르는 수동 모드다. 앱에는 "자율 준비 안 됨"으로만 보이게 한다.
+            if (target_mode_ == Mode::JOY || mode_ == Mode::JOY)
+                return "ALIGN";
+            return "EXITING_DOCKING";
+        }
         switch (mode_) {
         case Mode::ACKERMANN:
             return "AUTONOMOUS";
         case Mode::DIFF:
             return "DOCKING";
+        case Mode::JOY:
         case Mode::ALIGN:
             return "ALIGN";
         }
@@ -695,16 +750,126 @@ class MotorNode : public rclcpp::Node
         return static_cast<int32_t>(std::llround(deg * STEER_RATIO * ENCODER_PPR / 360.0));
     }
 
+    // 전륜(ID 2)은 후륜과 반대 방향으로 돌린다. diff_steer_front_deg 로 부호까지 직접 줄 수 있다.
     double diff_front_deg() const
     {
-        return diff_steer_front_deg_ != 0.0 ? diff_steer_front_deg_ : diff_steer_deg_;
+        return diff_steer_front_deg_ != 0.0 ? diff_steer_front_deg_ : -diff_steer_deg_;
     }
     double diff_rear_deg() const
     {
         return diff_steer_rear_deg_ != 0.0 ? diff_steer_rear_deg_ : diff_steer_deg_;
     }
 
-    // 모드별 조향 목표각 [deg]. ALIGN/ACKERMANN 은 0 (애커만 주행 중 각도는 제어 루프가 결정).
+    // --- JOY 모드: 조향축 속도제어 ---
+
+    // 조향 각속도 [deg/s] -> 0x60FF 단위(pulse/s). 각도->pulse 와 같은 환산(감속비*PPR/360)이고,
+    // 주행축이 쓰는 속도 단위계와도 같다.
+    static int32_t steer_deg_s_to_pulse(double deg_s) { return deg_to_steer_pulse(deg_s); }
+
+    // 조향 한계에서 더 밀어넣는 방향만 막는다. 되돌리는 방향은 그대로 통과시킨다.
+    double limit_steer_rate(double angle_rad, double rate_deg_s) const
+    {
+        if (rate_deg_s > 0.0 && angle_rad >= max_steering_angle_rad_)
+            return 0.0;
+        if (rate_deg_s < 0.0 && angle_rad <= -max_steering_angle_rad_)
+            return 0.0;
+        return rate_deg_s;
+    }
+
+    void send_steer_velocity(double front_deg_s, double rear_deg_s)
+    {
+        // PP 상태에서 속도값을 보내면 그대로 위치 지령이 된다. 반드시 막는다.
+        if (steering_op_mode_ != 3)
+            return;
+        send_steer_pdo(ID_FRONT_STEER, steer_deg_s_to_pulse(front_deg_s), 0x000F);
+        send_steer_pdo(ID_REAR_STEER, steer_deg_s_to_pulse(rear_deg_s), 0x000F);
+        // JOY 에는 목표각이 없다. steer_angle_deg 의 지령칸에는 현재각을 그대로 싣는다.
+        steer_cmd_deg_front_ = current_steer_angle_front_ * RAD2DEG;
+        steer_cmd_deg_rear_ = current_steer_angle_rear_ * RAD2DEG;
+    }
+
+    // PV 로 돌던 조향축을 그 자리에 세운다. 속도 지령은 새로 주지 않으면 계속 유지되므로
+    // JOY 제어 루프를 빠져나가는 모든 경로에서 한 번은 불러야 한다.
+    void stop_steering_velocity()
+    {
+        if (steering_op_mode_ != 3)
+            return;
+        send_steer_pdo(ID_FRONT_STEER, 0, 0x000F);
+        send_steer_pdo(ID_REAR_STEER, 0, 0x000F);
+    }
+
+    // 조향축 0x6060 을 PP(1) <-> PV(3) 로 바꾸고 RPDO 매핑(0x607A <-> 0x60FF)도 같이 옮긴다.
+    // TPDO 는 건드리지 않는다 - 두 모드 모두 조향 각도 피드백(0x6064)을 그대로 써야 한다.
+    void set_steering_operation_mode(int op_mode)
+    {
+        if (steering_op_mode_ == op_mode || can_sock_ < 0)
+            return;
+
+        stop_steering_velocity(); // PV 를 떠날 때 마지막 속도 지령을 남기지 않는다
+
+        for (const int id : {ID_FRONT_STEER, ID_REAR_STEER}) {
+            const int32_t actual_pulse =
+                (id == ID_FRONT_STEER) ? current_steer_pulse_front_ : current_steer_pulse_rear_;
+            send_sdo_write(id, OD_CONTROL_WORD, 0, 0x0006, 2); // Ready to switch on
+            send_sdo_write(id, OD_MODES_OF_OP, 0, op_mode, 1);
+            setup_rpdo_mapping(id, op_mode);
+            if (op_mode == 3) {
+                send_sdo_write(id, 0x6083, 0, steering_profile_acceleration_, 4);
+                send_sdo_write(id, 0x6084, 0, steering_profile_deceleration_, 4);
+                send_sdo_write(id, OD_TARGET_VEL, 0, 0, 4);
+            } else {
+                send_sdo_write(id, 0x6081, 0, steering_profile_velocity_, 4);
+                send_sdo_write(id, 0x6083, 0, steering_profile_acceleration_, 4);
+                send_sdo_write(id, 0x6084, 0, steering_profile_deceleration_, 4);
+                // 예전 목표각이 되살아나 튀지 않도록 지금 위치를 목표로 넣고 켠다.
+                send_sdo_write(id, OD_TARGET_POS, 0, actual_pulse, 4);
+            }
+            send_sdo_write(id, OD_CONTROL_WORD, 0, 0x0007, 2);
+            send_sdo_write(id, OD_CONTROL_WORD, 0, 0x000F, 2);
+        }
+
+        steering_op_mode_ = op_mode;
+
+        if (op_mode == 1) {
+            // PP 복귀: 셋포인트 핸드셰이크를 현재 위치 기준으로 다시 잡는다.
+            last_pulse_front_ = current_steer_pulse_front_;
+            last_pulse_rear_ = current_steer_pulse_rear_;
+            toggle_front_ = toggle_rear_ = 0;
+            setpoint_retry_front_ = setpoint_retry_rear_ = 0;
+            setpoint_feedback_front_ = current_steer_pulse_front_;
+            setpoint_feedback_rear_ = current_steer_pulse_rear_;
+            neutral_steering_hold_latched_ = false;
+        }
+
+        // 드라이브가 다시 Operation Enabled 가 될 때까지 여유를 준다. 이 창 안에서는
+        // 상태가 아직 아니어도 모드 전환을 실패시키지 않고 기다린다.
+        steering_mode_settle_deadline_ =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(STEERING_MODE_SETTLE_MS);
+
+        // 실제로 바뀌었는지 확인용으로 되읽는다(응답은 handle_sdo_response 가 찍는다).
+        send_sdo_read(ID_FRONT_STEER, OD_MODES_OF_OP, 0);
+        send_sdo_read(ID_REAR_STEER, OD_MODES_OF_OP, 0);
+
+        RCLCPP_WARN(this->get_logger(), "Steering IDs 2/4 -> %s (0x6060=%d)",
+                    op_mode == 3 ? "Profile Velocity" : "Profile Position", op_mode);
+    }
+
+    // 진단용 4축 상태 요약. 전환 실패 로그에 붙여 원인을 바로 보이게 한다.
+    std::string motor_state_summary() const
+    {
+        std::string out;
+        for (const int id : {ID_FRONT_DRIVE, ID_FRONT_STEER, ID_REAR_DRIVE, ID_REAR_STEER}) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%sID%d=0x%04X%s", out.empty() ? "" : " ", id,
+                          static_cast<unsigned>(motor_status_[id].statusword),
+                          status_is_fresh(id) ? "" : "(stale)");
+            out += buf;
+        }
+        return out;
+    }
+
+    // 모드별 조향 목표각 [deg]. ALIGN/ACKERMANN/JOY 은 0 (애커만 주행 중 각도는 제어 루프가 결정,
+    // JOY 는 0 도로 센터링한 뒤 조이스틱이 거기서부터 각속도로 움직인다).
     void mode_steer_targets_deg(Mode m, double& front, double& rear) const
     {
         if (m == Mode::DIFF) {
@@ -719,6 +884,7 @@ class MotorNode : public rclcpp::Node
     void fail_mode(const std::string& reason)
     {
         stop_drive_motors();
+        set_steering_operation_mode(1); // JOY(PV) 였다면 속도 지령을 끊고 위치제어로 되돌린다
         cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
         transitioning_ = false;
         mode_request_pending_ = false;
@@ -804,6 +970,22 @@ class MotorNode : public rclcpp::Node
             RCLCPP_ERROR(this->get_logger(), "SDO abort: ID=%d index=0x%04X sub=%u code=0x%08X", id,
                          static_cast<unsigned>(index), static_cast<unsigned>(sub),
                          static_cast<unsigned>(abort_code));
+            return;
+        }
+
+        // 6060h는 Integer8이므로 expedited upload 응답은 0x4F이다.
+        if (frame.data[0] == 0x4F && index == OD_MODES_OF_OP && sub == 0) {
+            const int actual_mode = static_cast<int8_t>(frame.data[4]);
+            if ((id == ID_FRONT_STEER || id == ID_REAR_STEER) &&
+                actual_mode != steering_op_mode_) {
+                RCLCPP_ERROR(this->get_logger(),
+                             "Motor ID %d modes_of_operation is %d but %d was requested; "
+                             "steering commands will be interpreted in the wrong mode",
+                             id, actual_mode, steering_op_mode_);
+            } else {
+                RCLCPP_INFO(this->get_logger(), "Motor ID %d modes_of_operation = %d", id,
+                            actual_mode);
+            }
             return;
         }
 
@@ -1177,6 +1359,8 @@ class MotorNode : public rclcpp::Node
         cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
         transitioning_ = false;
         stop_drive_motors();
+        // 복구 절차는 전부 위치 지령(0x607A)이다. JOY(PV) 였다면 먼저 되돌린다.
+        set_steering_operation_mode(1);
         set_initialization_status("INITIALIZING",
                                   requested ? "Lower motor initialization and steering centering"
                                             : "Automatic steering fault recovery",
@@ -1217,6 +1401,7 @@ class MotorNode : public rclcpp::Node
         if (drive_fault_active()) {
             motion_inhibited_ = true;
             stop_drive_motors();
+            stop_steering_velocity();
             if (steering_recovery_requested_ || initialization_in_progress_) {
                 steering_recovery_requested_ = false;
                 recovery_was_requested_ = false;
@@ -1235,8 +1420,21 @@ class MotorNode : public rclcpp::Node
                 start_steering_recovery(true);
                 return true;
             }
-            if (!steering_fault_active())
+            if (!steering_fault_active()) {
+                if (motion_inhibited_) {
+                    stop_steering_velocity(); // JOY(PV) 가 마지막 속도로 계속 돌지 않게
+                    // 여기서 true 를 돌려주면 제어 루프가 바로 끝나 모드 요청 처리까지 못 간다.
+                    // 요청이 조용히 사라진 것처럼 보이지 않게 이유를 남긴다.
+                    if (mode_request_pending_) {
+                        RCLCPP_WARN_THROTTLE(
+                            this->get_logger(), *this->get_clock(), 3000,
+                            "mode %s ignored: motion is inhibited%s. Call motor_node/initialize "
+                            "to recover.",
+                            mode_name(requested_mode_), failed_ ? " (state FAILED)" : "");
+                    }
+                }
                 return motion_inhibited_;
+            }
             if (!steering_auto_recovery_armed_) {
                 fail_steering_recovery("fault recurred after the one-shot automatic recovery");
                 return true;
@@ -1425,9 +1623,9 @@ class MotorNode : public rclcpp::Node
     void mode_cb(const std_msgs::msg::Int32::SharedPtr msg)
     {
         const int m = msg->data;
-        if (m < 0 || m > 2) {
-            RCLCPP_WARN(this->get_logger(), "Unknown mode %d ignored (0=align, 1=ackermann, 2=diff)",
-                        m);
+        if (m < 0 || m > 3) {
+            RCLCPP_WARN(this->get_logger(),
+                        "Unknown mode %d ignored (0=align, 1=ackermann, 2=diff, 3=joy)", m);
             return;
         }
         requested_mode_ = static_cast<Mode>(m);
@@ -1465,6 +1663,8 @@ class MotorNode : public rclcpp::Node
 
         // 전환 시작: 주행 정지 -> 조향 목표각 이동 -> 도달 시 활성화
         stop_drive_motors();
+        // JOY 에서 나가는 길이면 조향축을 위치제어로 먼저 되돌린다(아래 목표각 이동이 PP 지령이다).
+        set_steering_operation_mode(1);
         cmd_vx_ = cmd_vy_ = cmd_wz_ = 0.0;
         awaiting_neutral_command_ = false;
         neutral_steering_hold_latched_ = false;
@@ -1492,7 +1692,16 @@ class MotorNode : public rclcpp::Node
             return true;
         }
         if (!all_motors_operational()) {
-            fail_mode("Motor feedback stale or motor not operational");
+            // 0x6060 을 막 바꾼 직후라면 드라이브가 Operation Enabled 로 복귀 중이다.
+            if (now < steering_mode_settle_deadline_) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 200,
+                                     "Waiting for steering drives to re-enable after operation "
+                                     "mode switch (%s)",
+                                     motor_state_summary().c_str());
+                return true;
+            }
+            fail_mode("Motor feedback stale or motor not operational (" + motor_state_summary() +
+                      ")");
             return true;
         }
 
@@ -1545,6 +1754,11 @@ class MotorNode : public rclcpp::Node
         } else if (mode_ == Mode::DIFF) {
             awaiting_neutral_command_ = false;
             publish_mode_status("Diff steering aligned; cmd_vel linear.x/y=lateral, angular.z=spin");
+        } else if (mode_ == Mode::JOY) {
+            awaiting_neutral_command_ = false;
+            // 여기서부터 조향은 각도가 아니라 각속도 지령이다.
+            set_steering_operation_mode(3);
+            publish_mode_status("Joystick manual ready; linear.x=drive, angular.z=steer rate");
         } else {
             awaiting_neutral_command_ = false;
             publish_mode_status("Steering centered; drive disabled");
@@ -1790,6 +2004,56 @@ class MotorNode : public rclcpp::Node
         send_drive_pdo(ID_REAR_DRIVE, wheel_mps_to_pulse(rear_speed), 0x000F);
     }
 
+    // JOY: 조이스틱 수동. 바퀴 방향 규칙은 애커만과 같다(전/후륜 역위상, 두 구동축 같은 부호).
+    // 다른 건 조향을 각도가 아니라 각속도로 준다는 것뿐이다(이 모드 동안 ID 2/4 는 PV).
+    void control_joy_mode(bool cmd_timeout)
+    {
+        if (cmd_timeout) {
+            stop_drive_motors();
+            stop_steering_velocity();
+            return;
+        }
+        if (!all_motors_operational()) {
+            stop_drive_motors();
+            stop_steering_velocity();
+            // JOY 진입 직후에는 조향축이 PV 로 다시 켜지는 중이라 정상이다.
+            if (std::chrono::steady_clock::now() >= steering_mode_settle_deadline_) {
+                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                      "Joy drive inhibited: %s", motor_state_summary().c_str());
+            }
+            return;
+        }
+
+        // 수동 주행 상한. joy_max_linear_vel 이 0 이면 전역 상한을 쓴다.
+        const double lin_lim = joy_max_linear_vel_ > 0.0
+                                   ? std::min(joy_max_linear_vel_, max_linear_vel_)
+                                   : max_linear_vel_;
+        double v = std::clamp(cmd_vx_, -lin_lim, lin_lim);
+        if (std::abs(v) < 0.001)
+            v = 0.0;
+
+        // 스틱은 max_angular_vel 로 정규화한다. 풀 스케일에서 joy_steer_rate_deg_s 가 나온다.
+        double stick = std::clamp(cmd_wz_ / max_angular_vel_, -1.0, 1.0);
+        if (std::abs(stick) < joy_stick_deadzone_)
+            stick = 0.0;
+        const double rate_deg_s = stick * joy_steer_rate_deg_s_;
+
+        // 역위상: 앞바퀴가 좌로 꺾이면 뒷바퀴는 우로 꺾인다 (애커만과 같은 바퀴 방향).
+        const double front_rate = limit_steer_rate(current_steer_angle_front_, rate_deg_s);
+        const double rear_rate = limit_steer_rate(current_steer_angle_rear_, -rate_deg_s);
+        send_steer_velocity(front_rate, rear_rate);
+
+        // 구동축은 앞뒤 같은 값. 조향각이 얼마든 바퀴는 제 방향으로 굴러간다.
+        send_drive_pdo(ID_FRONT_DRIVE, wheel_mps_to_pulse(v), 0x000F);
+        send_drive_pdo(ID_REAR_DRIVE, wheel_mps_to_pulse(v), 0x000F);
+
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                             "Joy cmd v=%.3f m/s steer_rate(F/R)=%.1f/%.1f deg/s "
+                             "angle(F/R)=%.1f/%.1f deg",
+                             v, front_rate, rear_rate, current_steer_angle_front_ * RAD2DEG,
+                             current_steer_angle_rear_ * RAD2DEG);
+    }
+
     // --- 제어 루프 ---
     void control_loop()
     {
@@ -1824,6 +2088,9 @@ class MotorNode : public rclcpp::Node
             break;
         case Mode::ACKERMANN:
             control_ackermann_mode(cmd_timeout);
+            break;
+        case Mode::JOY:
+            control_joy_mode(cmd_timeout);
             break;
         }
     }

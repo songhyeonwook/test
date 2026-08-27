@@ -1,8 +1,3 @@
-"""하부 모터노드만 띄운다 (조이스틱 없음).
-
-bringup 의 bringup.launch.py 가 motor:=true 로 포함한다. 조이스틱 수동주행까지
-필요하면 이 패키지의 bringup.launch.py 를 쓴다.
-"""
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -23,13 +18,17 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 # 조향 Profile Position (rbio 기본값)
-                'steering_profile_velocity': 40000,
-                'steering_profile_acceleration': 40000,
-                'steering_profile_deceleration': 40000,
-                'max_steering_angle_deg': 55.0,
+                'steering_profile_velocity': 50000,
+                'steering_profile_acceleration': 50000,
+                'steering_profile_deceleration': 80000,
+                'max_steering_angle_deg': 45.0,
+                # 주행 프로파일. 0x6083(가속) / 0x6084(감속) 을 따로 준다.
+                # 감속을 크게 잡으면 정지가 빨라지고, 작게 잡으면 부드럽게 선다.
+                'drive_profile_acceleration': 50000,
+                'drive_profile_deceleration': 80000,
                 # cmd_vel 상한 / 타임아웃
-                'max_linear_vel': 0.2,
-                'max_angular_vel': 0.3,
+                'max_linear_vel': 0.5, #0.2
+                'max_angular_vel': 0.5, #0.3
                 'cmd_vel_timeout_s': 0.5,
                 # 디프 모드 (/mode 2): 전후륜을 이 각도로 돌려 고정. 0 이면 공통값 사용.
                 # linear.x(또는 y) = 횡이동(+ 좌), angular.z = 제자리 회전
@@ -40,6 +39,11 @@ def generate_launch_description():
                 'diff_max_angular_vel': LaunchConfiguration('diff_max_angular_vel'),
                 'startup_mode': LaunchConfiguration('startup_mode'),
                 'diff_linear_x_is_lateral': True,
+                # JOY 모드 (/mode 3): 조이스틱 수동. 조향축을 속도제어(PV)로 바꿔 쓴다.
+                # angular.z 를 max_angular_vel 로 정규화해 풀 스케일에서 이 조향속도가 나온다.
+                'joy_steer_rate_deg_s': 20.0,
+                'joy_max_linear_vel': 0.0,  # 0 = 전역 max_linear_vel
+                'joy_stick_deadzone': 0.05,
                 # 4WS 휠 오도메트리. odom->base_link TF 는 fast_lio 의 tf_2d.py 가
                 # 내므로 여기서는 /odom 토픽만 낸다. 단독 테스트 시 True 로.
                 'odom_frame_id': 'odom',
