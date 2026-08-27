@@ -14,6 +14,8 @@
                         - motor_node 는 센터링 뒤 자동으로 애커만 진입, 도킹 속도 0.04/0.05
   rviz:=false           rviz 없이
   map:=<이름>           navigation/map/<이름>.yaml(2D) + <이름>.pcd(3D) 를 쓴다
+ros2 launch bringup bringup.launch.py map:=<이름>   
+
 """
 import os
 
@@ -42,7 +44,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('localization', default_value='true'),
-        DeclareLaunchArgument('navigation', default_value='true'),
+        DeclareLaunchArgument('navigation', default_value='false'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('motor', default_value='true'),
         DeclareLaunchArgument('app', default_value=EnvironmentVariable('HW_APP_MODE', default_value='false')),

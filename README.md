@@ -43,7 +43,8 @@ src/navigation/
 MID-360 front ─┐  CustomMsg
 MID-360 rear  ─┴─ livox_merge ─┬─ /livox_merge/merged_pointcloud         (전체)  ─┐
                                └─ /livox_merge/merged_pointcloud_sliced  (z 슬라이스 + 차체 크롭) ─ Nav2 costmap
-MID-360 top ───── /livox/imu_192_168_1_135 ────────────────────────────────────────┤
+MID-360 top ─┬─── /livox/imu_192_168_1_135 ────────────────────────────────────────┤
+             └─── /livox_top/pointcloud  (변환만, 측위/내비에는 안 들어감)
                                                                                      │
                         fastlio_mapping        /Odometry (camera_init->body, 3D)  <──┘
                         global_localization    /map_to_odom (map->camera_init, ICP 0.5Hz)
@@ -114,7 +115,7 @@ ABI 로 빌드되어 있어 import 가 깨진다. 위처럼 numpy2 호환 버전
 
 ## 라이다 네트워크
 
-MID-360 3대는 유선 `enp130s0` 하나에 스위치로 묶여 있고, 드라이버 설정
+MID-360 3대는 유선 `enP8p1s0` 하나에 스위치로 묶여 있고, 드라이버 설정
 (`src/livox_ros_driver2/config/multi_MID360_config.json`)이 호스트 IP 를 라이다마다
 다른 서브넷으로 요구한다. 유선 연결을 DHCP 로 두면 라이다가 붙지 않는다.
 
@@ -127,17 +128,22 @@ MID-360 3대는 유선 `enp130s0` 하나에 스위치로 묶여 있고, 드라�
 한 번만 설정하면 부팅 시 자동 적용된다:
 
 ```bash
-sudo nmcli con mod "Wired connection 1" \
+sudo nmcli con mod "Wired connection 2" \
   ipv4.method manual \
   ipv4.addresses "192.168.1.50/24,192.168.2.50/24,192.168.3.50/24" \
   ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
-sudo nmcli con up "Wired connection 1"
-ip -4 -br addr show enp130s0          # 주소 3개 확인
+sudo nmcli con up "Wired connection 2"
+ip -4 -br addr show enP8p1s0          # 주소 3개 확인
 for ip in 192.168.1.135 192.168.2.102 192.168.3.144; do ping -c1 -W1 $ip; done
 ```
 
 `ipv4.never-default yes` 는 유선이 기본 게이트웨이를 가져가 Wi-Fi 인터넷을 끊는 것을 막는다.
 호스트 IP 는 rbio TransferRobot 의 Jetson 과 동일하게 맞춘 값이다 (앱 내장 설정과 호환).
+인터페이스/연결 이름은 장비마다 다를 수 있다 - `nmcli -t -f NAME,DEVICE con show` 로 확인.
+
+드라이버가 `bind failed` -> `Init lds lidar fail!` 로 죽으면 십중팔구 이 표가 안 맞는 것이다.
+SDK 는 `host_ip` 를 그대로 bind 하므로, 그 주소가 이 PC 에 없으면 라이다 3대가 통째로 안 붙는다
+(ping 은 되는데 안 붙는 게 특징). `ip -4 -br addr show` 로 세 주소가 다 있는지 먼저 본다.
 
 **SDK multi-NIC 패치가 필수다.** 순정 Livox-SDK2 는 detection 소켓을 첫 번째 라이다의
 host_ip 하나에만 열어서, 서브넷이 3개면 라이다 1대만 붙는다. `third_party/Livox-SDK2` 에는
@@ -324,7 +330,19 @@ Profile Position(0x607A) + New set-point/ACK 핸드셰이크. 시동 시 Fault r
 |---|---|---|---|
 | 0 | ALIGN 정렬 | 앞뒤 0° 유지 | 무시, 구동 차단 |
 | 1 | ACKERMANN | 4WS 역위상 (뒤 = −앞) | `linear.x`, `angular.z` |
-| 2 | DIFF 디프 | 앞뒤 `diff_steer_deg`(90°) 고정 | `linear.x`(또는 `y`) = 횡이동(+좌), `angular.z` = 제자리 회전 |
+| 2 | DIFF 디프 | 앞 −`diff_steer_deg`(−90°) / 뒤 +`diff_steer_deg`(90°) 고정 | `linear.x`(또는 `y`) = 횡이동(+좌), `angular.z` = 제자리 회전 |
+| 3 | JOY 수동 | 4WS 역위상 (애커만과 같은 바퀴 방향), **각도가 아니라 각속도 지령** | `linear.x` = 주행 속도, `angular.z` = 조향 각속도 |
+
+JOY 모드만 조향축(ID 2/4)을 **Profile Velocity(0x6060=3, RPDO→0x60FF)** 로 바꿔 쓴다.
+진입할 때 조향을 0 도로 센터링한 뒤 전환하고, 빠져나갈 때(모드 변경·`initialize`·fault
+복구·전환 실패) Profile Position 으로 되돌린다. 조이스틱은 `teleop_twist_joy` 가 내는
+`/cmd_vel` 을 그대로 쓰고, 해석만 이 모드에서 달라진다.
+
+* 스틱은 `max_angular_vel` 로 정규화한다 — 풀 스케일에서 `joy_steer_rate_deg_s`(기본 20°/s).
+* `max_steering_angle_deg`(기본 55°)에 닿으면 **더 밀어넣는 방향만** 0 으로 막는다.
+* 구동은 앞뒤 같은 부호·같은 속도. 수동 상한은 `joy_max_linear_vel`(0 이면 전역값).
+* PV 는 새 지령을 안 주면 마지막 속도로 계속 돈다. cmd_vel 타임아웃·모터 stale·fault·
+  모드 이탈에서 전부 속도 0 을 먼저 보낸다.
 
 모드 전환은 **주행이 멈춘 뒤** 조향을 목표각으로 옮기고 3° 이내 도달하면 활성화된다
 (`motor_node/drive_mode` 에 `ALIGN|…`, `TO_DIFF|…`, `DIFF|…`). 애커만 진입 직후에는
@@ -346,7 +364,8 @@ vx = (v_f cosδf + v_r cosδr)/2,  vy = (v_f sinδf + v_r sinδr)/2,  wz = (v_f 
 `motor_node/{command_ack, diagnostics, initialization_status, drive_mode}`,
 `motor_node/initialize`(재초기화·센터링), `motor_node/reset_odom`,
 rbio 앱 호환 `motor_node/set_docking_mode`, `docking/cmd_vel`. 파라미터는
-`src/motor_node/launch/motor.launch.py` (`startup_mode` 는 app 모드에서 1).
+`src/motor_node/launch/motor.launch.py` (`startup_mode` 는 app 모드에서 1,
+JOY 관련은 `joy_steer_rate_deg_s` / `joy_max_linear_vel` / `joy_stick_deadzone`).
 
 ## Nav2 구성
 
