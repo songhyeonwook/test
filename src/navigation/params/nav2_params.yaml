@@ -52,10 +52,6 @@ bt_navigator:
     wait_for_service_timeout: 5000
     default_nav_to_pose_bt_xml: ""
     default_nav_through_poses_bt_xml: ""
-    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
-    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
-    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
-    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -169,7 +165,6 @@ controller_server:
       az_max: 0.5
       motion_model: "Ackermann"
       AckermannConstraints:
-        # 플래너 GridBased.minimum_turning_radius 와 반드시 같은 값 유지.
         min_turning_r: 1.30
       prune_distance: 2.0
       transform_tolerance: 0.3
@@ -243,9 +238,6 @@ local_costmap:
       # 코스트맵으로 롤아웃한다. 입력 클라우드는 20Hz 라 여유가 있다.
       update_frequency: 10.0
       publish_frequency: 2.0
-      # REP-105: local costmap 은 연속 프레임인 odom 에 둔다. map 에 두면
-      # global_localization 의 ICP 보정(map->odom 점프)이 회피 중인 장애물
-      # 위치까지 같이 옮겨 버린다. static_layer 는 TF 로 map->odom 을 따라온다.
       global_frame: odom
       robot_base_frame: base_link
       use_sim_time: False
@@ -261,9 +253,6 @@ local_costmap:
       # Vehicle footprint based on measured size:
       # length 1.62 m, max width 0.952 m, with small safety margin.
       footprint: "[[0.81, 0.48], [0.81, -0.48], [-0.81, -0.48], [-0.81, 0.48]]"
-      # obstacle_layer: 동적 장애물. 입력은 livox_merge 의 sliced 클라우드
-      # (base_footprint 프레임, z 슬라이스 + 차체 크롭 적용됨). TF 정리 후
-      # base_footprint 가 rigid 프레임이 되어 이제 안전하게 넣을 수 있다.
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -279,24 +268,10 @@ local_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 8.0
           raytrace_min_range: 0.0
-          # 주의: 이 두 값은 costmap 의 global_frame(odom) 기준이고,
-          # livox_merge 의 slice_z_min/max 는 base_footprint(지면) 기준이다.
-          # odom 의 z=0 은 base_link 라 지면보다 0.5m 위 -> 두 값을 같은 숫자로
-          # 맞추면 안 된다. 실제 z 필터는 slice_z 가 담당하고 여기는 여유폭이다.
-          # (slice 0.15~2.3 지면기준 == -0.35~1.8 odom기준, 아래 범위 안에 든다)
           min_obstacle_height: -0.5
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 내접반경(0.49)이 아니라 외접반경(0.94) 이상으로 잡아야 한다.
-        # nav2_mppi_controller/src/critics/cost_critic.cpp 의 inCollision 은
-        #   cost >= possibly_inscribed_cost_ 일 때만 실제 footprint 검사를 한다.
-        # possibly_inscribed_cost_ 는 외접반경에서의 인플레이션 비용(여기선 약 65)
-        # 인데, inflation_radius 가 0.55 면 장애물에서 0.55~0.94m 떨어진 셀은
-        # 비용이 0 이라 이 검사를 건너뛴다. 그런데 차체 대각 반경은 0.94m 라
-        # 그 구간에서 차체 모서리가 실제로 벽에 박혀도 충돌로 안 잡혔다.
-        # -> 0.95 로 올려서 검사 구간을 차체 외접원 전체로 덮는다.
-        # (253 은 CostCritic 이 충돌로 보지 않으므로 회피 여유만 늘어난다)
         cost_scaling_factor: 3.0
         inflation_radius: 0.95
       static_layer:
@@ -312,16 +287,9 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: False
-      # local costmap 과 반드시 같은 실측 footprint 를 쓴다. 전역이 더 작으면
-      # 플래너가 "지나갈 수 있다" 고 판단한 틈을 MPPI(CostCritic,
-      # consider_footprint=true)가 거부하면서 그 자리에 멈춘다.
-      # 벽에 붙여 주차했을 때의 "Starting point in lethal space" 는 footprint 를
-      # 줄여서가 아니라 출발 위치를 벽에서 20~30cm 띄워 푼다.
       footprint: "[[0.81, 0.48], [0.81, -0.48], [-0.81, -0.48], [-0.81, 0.48]]"
       resolution: 0.05
       track_unknown_space: true
-      # obstacle_layer 를 글로벌에도 넣어, 지도에 없는 장애물이 오래 머물면
-      # 주기 재계획(BT 0.2Hz)이 아예 돌아가는 경로를 뽑도록 한다.
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -344,27 +312,16 @@ global_costmap:
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 값 근거 (nav2_smac_planner/src/collision_checker.cpp):
-        #  - footprint 외곽 판정 임계는 OCCUPIED(254) 다. 253(INSCRIBED)은
-        #    외곽에 닿아도 충돌이 아니다.
-        #  - 중심 셀만 253/254 면 즉시 충돌. 253 띠 폭은 inflation_radius 와
-        #    무관하게 항상 min(inflation_radius, 내접반경 0.49) 로 잘린다.
-        #    -> 0.49 이상으로 키워도 진입금지 영역이 넓어지지 않는다.
-        #  - inflation_radius 가 외접반경(sqrt(0.81^2+0.48^2)=0.94) 보다 작으면
-        #    possible_inscribed_cost_ = 0 이 되어 Smac 이 매 노드마다 전체
-        #    footprint 검사를 도는 느린 경로로 떨어진다.
-        # 그래서 외접반경 이상인 0.95 로 둔다. 이때 비로소 0.49~0.95 구간에
-        # 감쇠 기울기가 생겨 Smac 의 cost_penalty 도 실제로 동작한다.
-        # (이전 0.08 은 nav2 자신이 "inscribed 0.490 보다 작다" 고 ERROR 를
-        #  찍던 값이다. 기울기가 없어 cost_penalty 가 무효였다.)
         cost_scaling_factor: 3.0
         inflation_radius: 0.95
       always_send_full_costmap: True
 
-# map_server 블록은 두지 않는다. navigation_launch.py 의 lifecycle_nodes 에
-# map_server 가 없어서 Nav2 는 자체 map_server 를 띄우지 않는다. 2D 점유맵은
-# localization.launch.py 가 띄운 map_server 가 /map 으로 발행하고 costmap 의
-# static_layer 가 그걸 구독한다. 맵 교체는 launch 의 map 인자 하나로 한다.
+map_server:
+  ros__parameters:
+    use_sim_time: False
+    # launch 의 map 인자로 덮어쓸 수 있다. 여기 값은 nav2 가 자체 map_server 를
+    # 띄울 때만 쓰인다(측위는 localization.launch.py 가 따로 띄운다).
+    yaml_filename: "/home/shw/hw/src/navigation/map/test.yaml"
 
 map_saver:
   ros__parameters:
@@ -419,16 +376,9 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    # BT 는 wait 만 쓴다. backup / drive_on_heading 은 rbio 앱이 도킹 접근·후퇴에
-    # 액션 클라이언트로 직접 호출한다 (/backup, /drive_on_heading). 회전형 spin 은
-    # 조향식 차량에서 불가능하므로 넣지 않는다.
-    behavior_plugins: ["wait", "backup", "drive_on_heading"]
+    behavior_plugins: ["wait"]
     wait:
       plugin: "nav2_behaviors/Wait"
-    backup:
-      plugin: "nav2_behaviors/BackUp"
-    drive_on_heading:
-      plugin: "nav2_behaviors/DriveOnHeading"
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.1
