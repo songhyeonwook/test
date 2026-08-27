@@ -1,4 +1,4 @@
-// 4WS 하부 모터 노드 (rbio TransferRobot motor_node 구조 + lowcon 모드 체계)
+// 4WS 하부 모터 노드 (rbio TransferRobot motor_node 구조 + lowcon 프로토타입의 /mode 체계)
 //
 //  - 주행 ID 1/3 : Profile Velocity(mode 3), 0x60FF 로 속도 명령
 //  - 조향 ID 2/4 : Profile Position(mode 1), 0x607A 로 목표 각도 명령
@@ -191,7 +191,7 @@ class MotorNode : public rclcpp::Node
                        30.0, 85.0) *
             DEG2RAD;
 
-        // --- 속도 상한 (lowcon 파라미터명) ---
+        // --- 속도 상한 ---
         max_linear_vel_ =
             std::clamp(this->declare_parameter<double>("max_linear_vel", 0.2), 0.01, 1.0);
         max_angular_vel_ =
@@ -199,7 +199,7 @@ class MotorNode : public rclcpp::Node
         cmd_vel_timeout_s_ =
             std::max(0.05, this->declare_parameter<double>("cmd_vel_timeout_s", 0.5));
 
-        // --- 디프 모드 (lowcon 파라미터명) ---
+        // --- 디프 모드 ---
         //   전후륜 각도를 따로 줄 수 있다 (0 이면 diff_steer_deg 공통).
         //   rbio 의 docking_front_pulse/rear_pulse 가 서로 달랐던 것과 같은 이유다.
         diff_steer_deg_ =
@@ -215,7 +215,7 @@ class MotorNode : public rclcpp::Node
         startup_mode_ =
             std::clamp(static_cast<int>(this->declare_parameter<int>("startup_mode", 0)), 0, 2);
 
-        // --- 오도메트리 (lowcon 파라미터명) ---
+        // --- 오도메트리 ---
         odom_frame_ = this->declare_parameter<std::string>("odom_frame_id", "odom");
         base_frame_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
         // hw 에서는 fast_lio_localization/tf_2d.py 가 odom->base_link 를 내므로 기본 false
