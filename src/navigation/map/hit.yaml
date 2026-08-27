@@ -1,4 +1,4 @@
-image: scans_new.pgm
+image: hit.pgm
 mode: trinary
 resolution: 0.05
 origin: [-30.5, -9.5, -0.02]
