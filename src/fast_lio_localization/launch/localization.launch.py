@@ -14,8 +14,6 @@ from launch_ros.actions import Node
 def generate_launch_description():
     package_path = get_package_share_directory('fast_lio_localization')
     default_config_path = os.path.join(package_path, 'config')
-    # rviz 설정은 이 패키지 안에, 맵은 navigation 패키지가 들고 있다.
-    # 2D(점유맵)와 3D(prior map)는 같은 주행에서 나온 짝이어야 하므로 한 곳에 둔다.
     default_rviz_config_path = os.path.join(package_path, 'rviz', 'fastlio_localization.rviz')
     map_dir = os.path.join(get_package_share_directory('navigation'), 'map')
 
@@ -130,8 +128,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 2D TF bridge: /Odometry + /map_to_odom 토픽 -> map -> odom -> base_link
-    # body(IMU) -> 차량 기준점 extrinsic(ref_from_body_*)은 mid360.yaml 에 있다.
     tf_2d_bridge_node = Node(
         package='fast_lio_localization',
         executable='tf_2d.py',
@@ -177,6 +173,8 @@ def generate_launch_description():
         package='rviz2',
         executable='rviz2',
         arguments=['-d', rviz_cfg],
+        # bag 재생(use_sim_time:=true)에서는 RViz 도 /clock 을 써야 TF 가 보인다.
+        parameters=[{'use_sim_time': use_sim_time}],
         condition=IfCondition(rviz_use),
         output='screen'
     )
