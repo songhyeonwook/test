@@ -15,7 +15,7 @@
 set -euo pipefail
 
 IFACE="${CAN_IFACE:-can0}"
-BITRATE="${CAN_BITRATE:-1000000}"
+BITRATE="${CAN_BITRATE:-250000}"
 RESTART_MS="${CAN_RESTART_MS:-100}"      # bus-off 자동 복구 지연
 TXQUEUELEN="${CAN_TXQUEUELEN:-1000}"     # 4축 PDO 50 Hz 송신 큐
 UNIT_NAME="can0_setup.service"
