@@ -1,0 +1,40 @@
+# 라이다 3대 병합 (실장비). pointcloud_concatenate_ros2 의 pointcloud_concat_node.
+#
+# 장착 위치는 여기 없다. 노드가 TF 를 그대로 읽으므로 기하는 URDF
+# (src/navigation/urdf/mount.xacro) 한 곳에만 있다. 예전 livox_merge 처럼
+# 4x4 행렬을 따로 들고 있지 않으므로 이중 관리가 사라졌다.
+#
+# 입출력 remapping 은 sensors.launch.py 가 준다:
+#   cloud_in1  /livox/lidar_192_168_2_102   livox_front
+#   cloud_in2  /livox/lidar_192_168_3_144   livox_rear
+#   cloud_in3  /livox/lidar_192_168_1_135   livox_top
+# (top 이 마지막인 건 clouds:2 로 낮추면 예전 front/rear 구성 그대로가 되게 하려는 것)
+#   cloud_out         /livox_merge/merged_pointcloud          -> FAST-LIO
+#   cloud_out_sliced  /livox_merge/merged_pointcloud_sliced   -> Nav2 costmap
+/**:
+  ros__parameters:
+    # base_link 는 지면 프레임이다(URDF 참조). 여기 기준 z = 지면 위 높이.
+    target_frame: "base_link"
+    clouds: 3
+
+    # 폴링 주기. 실제 발행은 sync_all 이 걸어서 라이다 발행률(10Hz)을 따른다.
+    # 높게 두면 세 대가 다 들어온 뒤 발행까지의 지연만 줄어든다.
+    hz: 50.0
+
+    # 세 대가 전부 새로 들어왔을 때만 발행한다. 끄면 고정 주기로 마지막 메시지를
+    # 다시 써서 같은 프레임이 두 번 나가거나 건너뛴다 - FAST-LIO 에 치명적이다.
+    sync_all: true
+
+    # header.stamp 를 입력들 중 가장 이른 스캔 시작 시각으로 찍는다.
+    # FAST-LIO 는 이걸 스캔 시작으로 보고 IMU 와 동기화한다.
+    stamp_from_input: true
+
+    # cloud_out_sliced = Nav2 costmap 의 장애물 입력.
+    slice_enable: true
+    # z_min 0.15 = 지면 위 15cm. 더 낮추면 바닥 반사가 장애물로 찍힌다.
+    slice_z_min: 0.15
+    slice_z_max: 2.3
+    # 차체 셀프 반사 크롭 (footprint 0.81x0.48 + 여유).
+    # top 이 차체 위에서 내려다보므로 이게 없으면 차량 자리가 장애물이 된다.
+    crop_half_x: 0.90
+    crop_half_y: 0.55

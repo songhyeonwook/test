@@ -8,14 +8,14 @@ Nav2 는 MPPI(Ackermann 모델) + Smac Hybrid-A* 로 돌린다.
 ```
 hw/
 ├── src/                            colcon 워크스페이스 (여기 하나뿐)
-│   ├── livox_ros_driver2/          MID-360 x3 드라이버 (CustomMsg)
-│   ├── livox_merge/                front/rear 2대를 하나로 병합 -> PointCloud2
+│   ├── livox_ros_driver2/          MID-360 x3 드라이버 (PointCloud2, xfer_format=0)
+│   ├── pointcloud_concatenate_ros2/ 라이다 3대를 TF 로 base_link 기준 병합
 │   ├── fast_lio_localization/      FAST-LIO 측위 + ICP 전역정합 + tf_2d 평면화
 │   ├── motor_node/                 CAN 4WS 구동. /mode 0 정렬·1 애커만·2 디프, /odom (4WS 휠 오도메트리)
 │   ├── navigation/                 ★ URDF/TF · Nav2 파라미터 · behavior tree · 맵
 │   └── bringup/                    ★ 전체 launch, bag 재생 테스트
 ├── third_party/Livox-SDK2/         colcon 대상 아님. multi-NIC 패치 적용됨, cmake --install 필요
-├── tools/                          check_frames.py, ply_to_pcd.py, rbio_env.sh (rbio 스크립트 연동)
+├── tools/                          check_frames.py, check_lidar_z.py, check_lidar_overlap.py, ply_to_pcd.py
 └── bag/                            rosbag 기록 위치 (git 제외)
 ```
 
@@ -40,11 +40,11 @@ src/navigation/
 ## 데이터 흐름
 
 ```
-MID-360 front ─┐  CustomMsg
-MID-360 rear  ─┴─ livox_merge ─┬─ /livox_merge/merged_pointcloud         (전체)  ─┐
-                               └─ /livox_merge/merged_pointcloud_sliced  (z 슬라이스 + 차체 크롭) ─ Nav2 costmap
-MID-360 top ─┬─── /livox/imu_192_168_1_135 ────────────────────────────────────────┤
-             └─── /livox_top/pointcloud  (변환만, 측위/내비에는 안 들어감)
+MID-360 front ─┐  PointCloud2 (xfer_format=0, 점마다 절대시각 timestamp)
+MID-360 rear  ─┤
+MID-360 top  ──┴─ pointcloud_concat ─┬─ /livox_merge/merged_pointcloud         (전체)  ─┐
+                  (TF 로 base_link)  └─ /livox_merge/merged_pointcloud_sliced  (z 슬라이스 + 차체 크롭) ─ Nav2 costmap
+MID-360 top ───── /livox/imu_192_168_1_135 ──────────────────────────────────────────┤
                                                                                      │
                         fastlio_mapping        /Odometry (camera_init->body, 3D)  <──┘
                         global_localization    /map_to_odom (map->camera_init, ICP 0.5Hz)
@@ -80,10 +80,15 @@ map ── odom ── base_link ── livox_frame ─┬─ livox_top ── i
   `tf_2d.py` 와 `global_localization.py` 가 파라미터로 받는다.
   RViz 에서 camera_init 프레임 토픽(`/cloud_registered` 등)을 보고 싶을 때만
   `localization.launch.py debug_tf:=true`.
-* 같은 기하가 세 곳에 있다: `mount.xacro`(원본), `livox_merge` 의 extrinsic
-  (base_link 기준), `mid360.yaml` 의 `extrinsic_T/R`(base_link -> IMU)
-  와 `ref_from_body_*`(IMU -> base_link). 센서 위치를 바꾸면 `mount.xacro` 만
-  고친 뒤 `python3 tools/check_frames.py` 로 나머지와의 정합을 확인한다.
+* 같은 기하가 두 곳에 있다: `mount.xacro`(원본)와 `mid360.yaml` 의
+  `extrinsic_T/R`(base_link -> IMU) · `ref_from_body_*`(IMU -> base_link).
+  병합 노드는 TF 를 그대로 읽으므로 장착값 사본을 들고 있지 않다.
+  센서 위치를 바꾸면 `mount.xacro` 만 고친 뒤
+  `python3 tools/check_frames.py` 로 나머지와의 정합을 확인한다.
+  **top 을 옮기면 `imu_link` 도 같이 움직이므로 `mid360.yaml` 의 `extrinsic_T` 와
+  `ref_from_body_xyz` 가 반드시 따라와야 한다** (check_frames.py 가 잡아준다).
+  URDF 값 자체가 실물과 맞는지는 `tools/check_lidar_z.py`(z, 천장 평면 기준) 로
+  본다. `check_lidar_overlap.py`(ICP) 는 실내에서 오탐이 잦으니 참고만.
   **이제 기준 프레임이 같아 `extrinsic_T` 와 `ref_from_body_xyz` 는 같은 값이다**
   (check_frames.py 가 이것도 검사한다).
 
@@ -168,7 +173,7 @@ systemd 유저 유닛으로 관리한다. 설계상 라이다/측위/Nav2 는 "�
 transfer-robot-can.service (system)   can0 up            <- rbio systemd/system
 manage_motor_node.sh                  rbio motor_node    <- 쓰지 않는다 (아래 참고)
 manage_navigation_stack.sh start      hw bringup.launch.py 를 유닛으로 실행
-                                       = 라이다 3대 + livox_merge + FAST-LIO + Nav2 + hw motor_node(/odom)
+                                       = 라이다 3대 + 병합 + FAST-LIO + Nav2 + hw motor_node(/odom)
 ```
 
 1. CAN 설치 (한 번): `sudo ~/hw/tools/can_setup.sh install` (아래 "CAN" 절).
@@ -428,10 +433,10 @@ ros2 launch bringup bag_localization.launch.py            # 측위. 기본 bag �
 ros2 launch navigation navigation_launch.py use_sim_time:=true   # Nav2 까지 보려면
 ```
 
-* bag 은 xfer_format=0 으로 기록되어 라이다가 PointCloud2 라, livox_merge 를
-  `input_type:=pointcloud2` 로 띄운다(`src/bringup/params/livox_merge_bag.yaml`).
-  실장비는 CustomMsg 경로다. 두 경로는 같은 형식으로 정규화되지만 실장비
-  경로는 bag 으로 검증되지 않는다.
+* bag 은 xfer_format=0 으로 기록되어 있고 실장비도 지금은 같은 형식이라
+  경로가 하나다(`src/bringup/params/livox_merge_bag.yaml`). 다른 건 `clouds`
+  뿐이다 - 기존 bag 은 front/rear 만 녹화돼 있어 2 이고, top 까지 들어 있는
+  bag 이면 `clouds:=3` 으로 띄운다.
 * 초기 자세: RViz 2D Pose Estimate, 또는 이 bag 은 지도 원점 근처에서 시작하므로
   `ros2 topic pub -1 -w 1 /initialpose geometry_msgs/msg/PoseWithCovarianceStamped '{header: {frame_id: map}, pose: {pose: {orientation: {w: 1.0}}}}'`
 * goal 은 `ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose ...`
@@ -447,6 +452,7 @@ ros2 launch navigation navigation_launch.py use_sim_time:=true   # Nav2 까지 �
 
 ```bash
 python3 tools/check_frames.py                            # URDF <-> 설정 정합 (값 바꿀 때마다)
+python3 tools/check_lidar_z.py                           # 장착 z 가 실물과 맞는가 (천장 평면 기준)
 rviz2 -d src/navigation/rviz/frames_check.rviz           # 모델과 클라우드 겹쳐보기
 ros2 run tf2_ros tf2_echo map base_link                  # z = 0(지면), camera_init 은 없어야 정상
 ros2 run tf2_tools view_frames

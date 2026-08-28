@@ -1,58 +1,25 @@
-# bag 재생용 livox_merge 설정.
-# 실장비 설정(src/livox_merge/config/livox_merge_config.yaml)과 extrinsic 은 같고
-# 입력 타입만 다르다. bag 은 xfer_format=0 으로 기록되어 PointCloud2 다.
+# bag 재생용 병합 설정.
+#
+# 실장비(livox_merge.yaml)와 값이 같고 clouds 만 다르다. 예전에는 bag 이
+# PointCloud2, 실장비가 CustomMsg 라 input_type 이 갈렸는데, 지금은 실장비도
+# xfer_format=0 (PointCloud2)로 내므로 형식 차이는 없다.
+#
+# clouds: 2  -> cloud_in1(front) + cloud_in2(rear). 기존 bag 이 이 두 개만
+#               녹화돼 있어서 기본값이다. top 까지 들어 있는 bag 이면
+#               bag_localization.launch.py 를 clouds:=3 으로 띄우면 된다
+#               (sync_all 때문에 없는 입력을 3 으로 잡으면 발행이 멈춘다).
+#
+# use_sim_time 은 launch 가 붙인다.
 /**:
   ros__parameters:
-    input_type: "pointcloud2"
+    target_frame: "base_link"
+    clouds: 2
+    hz: 50.0
+    sync_all: true
+    stamp_from_input: true
 
-    sync_frequency: 20.0
-    # 실장비 설정과 동일한 costmap 용 슬라이스/차체 크롭
+    slice_enable: true
     slice_z_min: 0.15
     slice_z_max: 2.3
-    slice_crop_half_x: 0.90
-    slice_crop_half_y: 0.55
-
-    lidars.topics:
-      - "/livox/lidar_192_168_2_102"   # lidar_0 = livox_front
-      - "/livox/lidar_192_168_3_144"   # lidar_1 = livox_rear
-
-    lidars.extrinsics.lidar_0:   # base_link(지면) <- livox_front
-      - 0.000000
-      - -1.000000
-      - 0.000000
-      - 0.697000
-      - 1.000000
-      - 0.000000
-      - 0.000000
-      - 0.350000
-      - 0.000000
-      - 0.000000
-      - 1.000000
-      - 0.320000
-      - 0.000000
-      - 0.000000
-      - 0.000000
-      - 1.000000
-
-    lidars.extrinsics.lidar_1:   # base_link(지면) <- livox_rear
-      - 0.000000
-      - 1.000000
-      - 0.000000
-      - -0.600000
-      - -1.000000
-      - 0.000000
-      - 0.000000
-      - -0.340000
-      - 0.000000
-      - 0.000000
-      - 1.000000
-      - 0.320000
-      - 0.000000
-      - 0.000000
-      - 0.000000
-      - 1.000000
-
-    output.pointcloud2: "/livox_merge/merged_pointcloud"
-    output.livox_custom: "/livox_merge/merged_livox"
-    output.pointcloud2_sliced: "/livox_merge/merged_pointcloud_sliced"
-    output.frame_id: "base_link"
+    crop_half_x: 0.90
+    crop_half_y: 0.55

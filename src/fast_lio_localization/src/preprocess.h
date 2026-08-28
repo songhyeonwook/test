@@ -16,8 +16,9 @@ enum LID_TYPE
   AVIA = 1,
   VELO16,
   OUST64,
-  MID360
-};  //{1, 2, 3}
+  MID360,
+  LIVOX_PC2
+};  //{1, 2, 3, 4, 5}
 enum TIME_UNIT
 {
   SEC = 0,
@@ -132,6 +133,33 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(livox_ros::LivoxPointXyzrtl,
     (uint8_t, line, line)
 )
 
+// livox_ros_driver2 가 xfer_format=0 으로 내는 PointCloud2 의 실제 레이아웃
+// (lddc.cpp: InitPointcloud2MsgHeader). 위 LivoxPointXyzrtl 과 달리 세기 필드
+// 이름이 intensity 이고, 점마다 절대시각 timestamp[ns] 가 붙는다.
+// 절대시각이라 여러 대를 합쳐도 점 시간이 그대로 한 축 위에 놓인다.
+namespace livox_pc2
+{
+struct EIGEN_ALIGN16 Point
+{
+  PCL_ADD_POINT4D;
+  float intensity;
+  uint8_t tag;
+  uint8_t line;
+  double timestamp;  /**< 절대시각, ns */
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+}  // namespace livox_pc2
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(livox_pc2::Point,
+    (float, x, x)
+    (float, y, y)
+    (float, z, z)
+    (float, intensity, intensity)
+    (std::uint8_t, tag, tag)
+    (std::uint8_t, line, line)
+    (double, timestamp, timestamp)
+)
+
 class Preprocess
 {
   public:
@@ -159,6 +187,7 @@ private:
   void oust64_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
+  void livox_pc2_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
   void pub_func(PointCloudXYZI &pl, const rclcpp::Time &ct);

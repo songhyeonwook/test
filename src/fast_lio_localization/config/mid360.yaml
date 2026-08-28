@@ -3,28 +3,20 @@
         feature_extract_enable: false
         point_filter_num: 3
         max_iteration: 3
-        filter_size_surf: 0.5
-        filter_size_map: 0.5
-        # Global localization tuning
-        # The indoor LiDAR+map overlap in this project often yields ICP fitness
-        # around 0.83, so 0.9 was rejecting otherwise good manual initial poses.
+        filter_size_surf: 0.2
+        filter_size_map: 0.2
         map_voxel_size: 0.1
         scan_voxel_size: 0.1
         freq_localization: 0.5
         localization_th: 0.80
-        # 주기 ICP 보정. 꺼두면 초기 정합 이후 FAST-LIO 드리프트가 영원히
-        # 안 잡힌다. 실패 시(임계 미만) 이전 추정을 유지하므로 켜도 안전하다.
+        fov_far: 25.0
+        max_correction_xyz: 0.5   # m
+        max_correction_deg: 5.0   # deg
         continuous_global_localization: true
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
-        # 3D prior map 경로는 여기 두지 않는다. localization.launch.py 의
-        # map 인자가 navigation/map/<이름>.pcd 로 만들어 이 세 노드
-        # (laser_mapping / global_localization / global_map_publisher) 에
-        # 직접 넘긴다. 맵을 바꾸는 곳은 그 인자 하나뿐이다.
-        # 주의: /map_save 서비스는 그 경로에 덮어쓴다. 측위 중에는 부르지 말 것.
-
         common:
-            lid_topic:  "/livox_merge/merged_pointcloud"   # PointCloud2. 범용 포맷으로 통일
+            lid_topic:  "/livox_merge/merged_pointcloud"   # 라이다 3대 병합 (base_link 기준)
             imu_topic:  "/livox/imu_192_168_1_135"   # 상단(livox_top) MID-360 내장 IMU
             time_sync_en: false        # 라이다와 IMU가 같은 장비(MID-360) 클럭이므로 불필요
                                         # ONLY turn on when external time synchronization is really not possible
@@ -32,10 +24,12 @@
                                         # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
 
         preprocess:
-            lidar_type: 3                # 3 = ouster 포맷. livox_merge 의 PointOuster 구조체가
-                                         # ouster_ros::Point 와 필드/타입/순서까지 동일하다.
-                                         # (x y z intensity t reflectivity ring ambient range)
-            scan_line:  8                # MID-360 4라인 x 2대. livox_merge 가 ring 오프셋을 주므로 합산값
+            lidar_type: 5                # 5 = LIVOX_PC2. livox_ros_driver2 xfer_format=0 의
+                                         # PointCloud2 레이아웃 (x y z intensity tag line timestamp).
+                                         # timestamp 가 절대시각이라 3대를 합쳐도 점 시간이
+                                         # 한 축 위에 놓인다. preprocess.cpp 의 livox_pc2_handler.
+            scan_line:  4                # MID-360 은 4라인. feature_extract_enable:false 라
+                                         # line 은 실제로 안 쓰이지만 값은 맞춰 둔다.
             blind: 0.5
             timestamp_unit: 3
             scan_rate: 10
@@ -46,26 +40,16 @@
             b_acc_cov: 0.0001
             b_gyr_cov: 0.0001
             fov_degree:    360.0
-            det_range:     100.0
-            extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
-            # 입력 클라우드는 livox_merge 가 base_link 로 보낸 것이고,
-            # IMU 는 livox_top 안에 있다. 그래서 이 값은 한 대짜리 MID-360 의
-            # 공장 오프셋이 아니라 base_link -> IMU 전체 변환이다.
-            #   inverse( T(base_link<-livox_frame) * T(livox_frame<-livox_top)
-            #            * T(livox_top<-IMU) )
-            # base_link 가 곧 지면이다. 아래 ref_from_body_* 와 같은 변환이므로
-            # 두 값은 항상 같아야 한다 (한쪽만 고치면 check_frames.py 가 잡는다).
-            extrinsic_T: [ 0.0, 1.32321, -0.23088 ]
+            det_range:     40.0       # MID-360 실사양(40m@10%). 실측 최대 반환도 20m 라
+                                       # 100 은 ikd-tree 큐브만 헛되이 키운다.
+           
+            extrinsic_est_en:  false     # true: enable the online estimation of IMU-LiDAR extrinsic
+            extrinsic_T: [ 0.0, 0.40401, -0.23088 ]   # 2026-08-28 top z 실측 반영
             extrinsic_R: [ -1., 0., 0.,
                             0., 0., -1.,
                             0., -1., 0.]
 
-        # tf_2d_bridge: body(IMU) 에서 본 base_link (tf_2d 가 실제로 발행하는
-        # 프레임). 위 extrinsic_T/R 과 같은 변환이다 (base_link = 지면 = 병합
-        # 클라우드 프레임). rpy 로 적을 뿐 값은 동일하다.
-        #   inverse( T(base_link<-...<-IMU) )
-        # 한쪽을 바꾸면 반드시 tools/check_frames.py 로 정합을 확인할 것.
-        ref_from_body_xyz: [ 0.0, 1.32321, -0.23088 ]
+        ref_from_body_xyz: [ 0.0, 0.40401, -0.23088 ]   # extrinsic_T 와 같아야 한다
         ref_from_body_rpy: [ -1.5707963267948966, 0.0, -3.141592653589793 ]  # -pi/2 0 -pi
 
         publish:

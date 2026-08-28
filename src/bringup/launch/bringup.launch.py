@@ -44,7 +44,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('localization', default_value='true'),
-        DeclareLaunchArgument('navigation', default_value='false'),
+        DeclareLaunchArgument('navigation', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('motor', default_value='true'),
         DeclareLaunchArgument('app', default_value=EnvironmentVariable('HW_APP_MODE', default_value='false')),

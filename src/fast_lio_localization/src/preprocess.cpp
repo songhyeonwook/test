@@ -2,6 +2,8 @@
 
 #include <pcl/common/common.h>
 
+#include <algorithm>
+
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
@@ -83,6 +85,10 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::UniquePtr &msg, Po
 
     case MID360:
       mid360_handler(msg);
+      break;
+
+    case LIVOX_PC2:
+      livox_pc2_handler(msg);
       break;
 
     default:
@@ -554,6 +560,59 @@ void Preprocess::mid360_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &
       pl_surf.push_back(std::move(added_pt));
     }
   }
+}
+
+// livox_ros_driver2 xfer_format=0 의 PointCloud2 를 그대로 받는다.
+// 점마다 절대시각(timestamp[ns])이 있으므로, 여러 대를 하나로 합친 구름이어도
+// header.stamp(=스캔 시작) 기준 오프셋만 빼면 점 시간이 바로 나온다.
+// mid360_handler 처럼 yaw 로 시간을 역산하지 않는다 - 합쳐진 구름에서는 그 가정이
+// 깨진다(라이다마다 원점과 회전이 다르다).
+void Preprocess::livox_pc2_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<livox_pc2::Point> pl_orig;
+  pcl::fromROSMsg(*msg, pl_orig);
+  const int plsize = pl_orig.points.size();
+  if (plsize == 0)
+    return;
+  pl_surf.reserve(plsize);
+
+  // 스캔 시작 시각. 병합 노드가 입력들 중 가장 이른 header.stamp 를 찍어준다.
+  const double base_ns = static_cast<double>(rclcpp::Time(msg->header.stamp).nanoseconds());
+
+  for (int i = 0; i < plsize; i++)
+  {
+    if (i % point_filter_num != 0)
+      continue;
+
+    const auto &src = pl_orig.points[i];
+    const double range = src.x * src.x + src.y * src.y + src.z * src.z;
+    if (range < (blind * blind))
+      continue;
+
+    PointType added_pt;
+    added_pt.x = src.x;
+    added_pt.y = src.y;
+    added_pt.z = src.z;
+    added_pt.intensity = src.intensity;
+    added_pt.normal_x = 0;
+    added_pt.normal_y = 0;
+    added_pt.normal_z = 0;
+    // curvature 단위는 ms. timestamp 가 0 인 입력(형식이 다른 경우)은 0 으로 둔다.
+    added_pt.curvature = (src.timestamp > 0.0) ? (src.timestamp - base_ns) * 1e-6 : 0.f;
+    if (added_pt.curvature < 0.f)
+      added_pt.curvature = 0.f;
+
+    pl_surf.points.push_back(added_pt);
+  }
+
+  // sync_packages() 가 points.back().curvature 를 스캔 끝 시각으로 쓴다.
+  // 라이다 3대의 점이 섞여 들어오므로 시간순으로 정렬해 둔다.
+  std::sort(pl_surf.points.begin(), pl_surf.points.end(),
+            [](const PointType &a, const PointType &b) { return a.curvature < b.curvature; });
 }
 
 void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg)

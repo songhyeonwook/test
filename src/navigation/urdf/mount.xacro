@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <!--
   장착값 한 곳. vehicle.urdf.xacro 가 읽는다.
-  값을 고치면 반드시 tools/check_frames.py 로 livox_merge / fast_lio 설정과의
-  정합을 확인할 것.
+  병합 노드는 이 값을 TF 로 그대로 받아 쓴다(사본 없음). 값을 고치면
+  tools/check_frames.py 로 fast_lio 설정과의 정합을,
+  tools/check_lidar_overlap.py 로 실물과의 정합을 확인할 것.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -24,16 +25,11 @@
   <xacro:property name="rear_xyz"  value="-0.6485 -0.345 0"/>
   <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
 
-  <!-- top 은 옆으로 눕혀 장착. x 는 내부 IMU 가 base_link 의 x=0 에 오도록
-       역산한 값이고, z(지면 기준) 만 추정치다(오차 +-0.025). -->
-  <xacro:property name="top_xyz"   value="-0.0375 -0.28 1.0265"/>
+  <!-- MID-360 장착 (livox_frame 기준). front/rear 는 정의상 정확히 원점대칭이다. -->
+  <xacro:property name="top_xyz"   value="-0.0375 -0.28 0.1073"/>
   <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
 
   <!-- MID-360 몸통 원점 -> 내부 IMU (Livox 공장값) -->
   <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>
-
-  <!-- FAST-LIO 의 body(=IMU) 에서 본 base_link 는 여기 없다.
-       fast_lio_localization/config/mid360.yaml 의 ref_from_body_* 를 볼 것.
-       (tf_2d.py 가 파라미터로 받는다) -->
 
 </robot>

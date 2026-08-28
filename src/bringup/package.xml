@@ -14,7 +14,7 @@
 
   <!-- 센서 -->
   <exec_depend>livox_ros_driver2</exec_depend>
-  <exec_depend>livox_merge</exec_depend>
+  <exec_depend>pointcloud_concatenate_ros2</exec_depend>
 
   <!-- 측위 -->
   <exec_depend>fast_lio_localization</exec_depend>

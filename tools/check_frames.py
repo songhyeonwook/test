@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """URDF 와 각 설정 파일의 장착값이 서로 맞는지 검사한다.
 
-같은 기하 정보가 세 군데에 있다:
+같은 기하 정보가 두 군데에 있다:
   src/navigation/urdf/mount.xacro            TF 값의 원본 (vehicle urdf 가 include)
-  src/livox_merge/config/livox_merge_config.yaml   포인트 병합
-  src/bringup/params/livox_merge_bag.yaml          같은 값의 bag 재생용 사본
   src/fast_lio_localization/config/mid360.yaml  병합클라우드->IMU extrinsic,
                                                + tf_2d 의 ref_from_body_*
 
+라이다 병합(pointcloud_concat_node)은 TF 를 그대로 읽으므로 장착값 사본을 들고
+있지 않다. 병합 설정에서 확인할 건 target_frame 뿐이다.
+(예전 livox_merge 는 4x4 행렬을 따로 들고 있어서 이중 관리였다.)
+
 주의: base_link 가 곧 지면 프레임이다 (2026-08-27 에 base_footprint 를 없애고 합침).
-livox_merge extrinsic / FAST-LIO extrinsic_T / tf_2d 의 ref_from_body_* 가 전부
-base_link 기준이라, extrinsic_T 와 ref_from_body_xyz 는 같은 값이어야 한다.
+FAST-LIO extrinsic_T / tf_2d 의 ref_from_body_* 가 전부 base_link 기준이라,
+extrinsic_T 와 ref_from_body_xyz 는 같은 값이어야 한다.
 
 한 곳만 고치고 나머지를 안 고치면 조용히 어긋난다. 값을 만질 때마다 돌릴 것.
 
@@ -28,7 +30,7 @@ import yaml
 IMU_IN_LIDAR = np.array([0.011, 0.02329, -0.04412])
 
 MERGE_CFGS = [
-    'src/livox_merge/config/livox_merge_config.yaml',
+    'src/bringup/params/livox_merge.yaml',
     'src/bringup/params/livox_merge_bag.yaml',
 ]
 
@@ -116,21 +118,16 @@ def main():
         print(f"  [{'OK' if good else '불일치'}] {lid} 의 부모 = "
               f"{parent_of.get(lid)} (livox_frame 이어야 함)")
 
-    # ---- livox_merge ----
-    print("\nlivox_merge extrinsics vs URDF (base_link=지면 기준)")
+    # ---- 병합 노드 ----
+    # 장착 기하는 TF 에서 오므로 확인할 건 어느 프레임으로 모으느냐 뿐이다.
+    # FAST-LIO extrinsic_T / ref_from_body_* 가 base_link 기준이라 여기도 같아야 한다.
+    print("\n병합 노드 target_frame")
     for path in MERGE_CFGS:
-        cfg = yaml.safe_load(open(path))
-        cfg = cfg.get('merge_lidar_node', cfg.get('/**'))['ros__parameters']
-        print(f"  {path}")
-        for key, link in [('lidar_0', 'livox_front'), ('lidar_1', 'livox_rear')]:
-            M = np.array(cfg[f'lidars.extrinsics.{key}']).reshape(4, 4)
-            check(f"  {key} <-> base_link<-{link}", M,
-                  pose(link, 'base_link'))
-        frame = cfg.get('output.frame_id')
-        if frame is not None:
-            good = frame == 'base_link'
-            ok &= good
-            print(f"    [{'OK' if good else '불일치'}] output.frame_id = {frame}")
+        cfg = yaml.safe_load(open(path))['/**']['ros__parameters']
+        frame = cfg.get('target_frame')
+        good = frame == 'base_link'
+        ok &= good
+        print(f"  [{'OK' if good else '불일치'}] {path}: target_frame = {frame}")
 
     # ---- FAST-LIO: 병합클라우드(base_link=지면) 를 IMU 에서 본 값 ----
     imu_bf = np.linalg.inv(pose('imu_link', 'base_link'))
