@@ -41,7 +41,10 @@
 //     linear.x  = 주행 속도 [m/s]  (앞뒤 구동축 같은 값 = 애커만과 같은 회전 방향)
 //     angular.z = 조향 각속도. 풀 스케일(|angular.z| = max_angular_vel)에서
 //                 joy_steer_rate_deg_s [deg/s] 가 나오도록 정규화한다.
-//   조향 한계(max_steering_angle_deg)에 닿으면 더 밀어넣는 방향만 0 으로 막는다.
+//   조향 한계(max_steering_angle_deg)는 남은 각도로 각속도 상한을 깎아 지킨다.
+//   PV 는 지령을 0 으로 내려도 0x6084 감속 램프를 타고 더 나가므로, 남은 각도 d 에서
+//   허용 속도를 sqrt(2*a*d) 로 묶어 한계 앞에서 서게 한다. 상한은 두 축 중 빡빡한
+//   쪽 비율을 양쪽에 같이 적용해 전/후륜 역위상을 유지한다.
 //
 // ── 오도메트리 (모드 무관 단일 모델) ─────────────────────────────
 //   전/후 축을 각각 조향 가능한 2축 플랫폼으로 보고, 측정된 조향각과 측정된
@@ -446,6 +449,10 @@ class MotorNode : public rclcpp::Node
     static constexpr double RECOVERY_ZERO_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
     static constexpr double DRIVE_STEERING_TOLERANCE_RAD = 3.0 * M_PI / 180.0;
     static constexpr double ODOM_MAX_DT_SEC = 0.5;
+    // 한계각 감속에 쓰는 여유. 0x6084 를 그대로 쓰면 딱 맞춰 서는 궤적이라 여유가 없다.
+    static constexpr double STEER_LIMIT_DECEL_MARGIN = 0.7;
+    // 조향각 피드백 지연(TPDO 이벤트 50ms + 제어주기 20ms). 그 사이에 더 들어간 만큼을 뺀다.
+    static constexpr double STEER_FEEDBACK_LATENCY_S = 0.07;
 
     rclcpp::Time last_cmd_time_;
     rclcpp::Time last_odom_time_;
@@ -766,14 +773,40 @@ class MotorNode : public rclcpp::Node
     // 주행축이 쓰는 속도 단위계와도 같다.
     static int32_t steer_deg_s_to_pulse(double deg_s) { return deg_to_steer_pulse(deg_s); }
 
-    // 조향 한계에서 더 밀어넣는 방향만 막는다. 되돌리는 방향은 그대로 통과시킨다.
-    double limit_steer_rate(double angle_rad, double rate_deg_s) const
+    // 0x6084 [counts/s^2] -> [deg/s^2]. deg_to_steer_pulse 의 역환산이다.
+    double steer_decel_deg_s2() const
     {
-        if (rate_deg_s > 0.0 && angle_rad >= max_steering_angle_rad_)
+        return static_cast<double>(steering_profile_deceleration_) * 360.0 /
+               (STEER_RATIO * ENCODER_PPR);
+    }
+
+    // 한 축이 지금 각도에서 rate_deg_s 방향으로 낼 수 있는 각속도 크기 [deg/s].
+    // 지령을 0 으로 내려도 감속거리 v^2/(2a) 만큼 더 나가므로, 남은 각도 d 에 대해
+    // sqrt(2*a*d) 를 넘지 않아야 한계 안에서 선다. 되돌리는 방향은 남은 각도가 크므로
+    // 자연히 제한되지 않는다.
+    double steer_rate_headroom(double angle_rad, double rate_deg_s) const
+    {
+        if (rate_deg_s == 0.0)
             return 0.0;
-        if (rate_deg_s < 0.0 && angle_rad <= -max_steering_angle_rad_)
+        const double max_deg = max_steering_angle_rad_ * RAD2DEG;
+        const double angle_deg = angle_rad * RAD2DEG;
+        double remaining = (rate_deg_s > 0.0) ? (max_deg - angle_deg) : (max_deg + angle_deg);
+        remaining -= std::abs(rate_deg_s) * STEER_FEEDBACK_LATENCY_S;
+        if (remaining <= 0.0)
             return 0.0;
-        return rate_deg_s;
+        return std::sqrt(2.0 * STEER_LIMIT_DECEL_MARGIN * steer_decel_deg_s2() * remaining);
+    }
+
+    // 두 조향축에 공통으로 걸 감속 비율 [0,1]. 한쪽만 0 으로 끊으면 역위상이 깨져
+    // 전/후륜이 서로 다른 각도로 남으므로, 더 빡빡한 쪽 비율을 양쪽에 같이 쓴다.
+    double steer_rate_scale(double front_rate_deg_s, double rear_rate_deg_s) const
+    {
+        const double mag = std::max(std::abs(front_rate_deg_s), std::abs(rear_rate_deg_s));
+        if (mag <= 0.0)
+            return 0.0;
+        const double front_cap = steer_rate_headroom(current_steer_angle_front_, front_rate_deg_s);
+        const double rear_cap = steer_rate_headroom(current_steer_angle_rear_, rear_rate_deg_s);
+        return std::clamp(std::min(front_cap, rear_cap) / mag, 0.0, 1.0);
     }
 
     void send_steer_velocity(double front_deg_s, double rear_deg_s)
@@ -2039,9 +2072,19 @@ class MotorNode : public rclcpp::Node
         const double rate_deg_s = stick * joy_steer_rate_deg_s_;
 
         // 역위상: 앞바퀴가 좌로 꺾이면 뒷바퀴는 우로 꺾인다 (애커만과 같은 바퀴 방향).
-        const double front_rate = limit_steer_rate(current_steer_angle_front_, rate_deg_s);
-        const double rear_rate = limit_steer_rate(current_steer_angle_rear_, -rate_deg_s);
+        // 한계각까지 남은 거리로 두 축에 같은 비율을 걸어 역위상을 유지한 채 감속한다.
+        const double scale = steer_rate_scale(rate_deg_s, -rate_deg_s);
+        const double front_rate = rate_deg_s * scale;
+        const double rear_rate = -rate_deg_s * scale;
         send_steer_velocity(front_rate, rear_rate);
+        if (rate_deg_s != 0.0 && scale < 1.0) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "Joy steer limited to %.0f%% near %.1f deg limit "
+                                 "(angle F/R=%.1f/%.1f deg)",
+                                 scale * 100.0, max_steering_angle_rad_ * RAD2DEG,
+                                 current_steer_angle_front_ * RAD2DEG,
+                                 current_steer_angle_rear_ * RAD2DEG);
+        }
 
         // 구동축은 앞뒤 같은 값. 조향각이 얼마든 바퀴는 제 방향으로 굴러간다.
         send_drive_pdo(ID_FRONT_DRIVE, wheel_mps_to_pulse(v), 0x000F);

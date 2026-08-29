@@ -11,7 +11,7 @@ CHANNEL = 'can0'
 NODE_IDS = [2, 4]  # 602(Node 2), 604(Node 4) 리스트
 REFRESH_RATE = 0.05 # 여러 노드이므로 응답 속도를 위해 약간 조절
 
-GEAR_RATIO  = 9.0
+GEAR_RATIO  = 10.0  # motor_node.cpp 의 STEER_RATIO 와 같아야 한다
 ENCODER_RES = 131072.0
 # ==========================================
 

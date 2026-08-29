@@ -26,7 +26,7 @@ CHANNEL = 'can0'
 NODE_IDS = [2, 4]
 
 COUNTS_PER_REV = 131072
-STEER_RATIO = 9.0
+STEER_RATIO = 10.0  # motor_node.cpp 의 STEER_RATIO 와 같아야 한다
 
 MODE_HOMING = 6
 HOMING_ZERO_SET_MODE = 35  # 현재 위치를 원점으로 설정

@@ -19,7 +19,7 @@ SDO_WRITE_4BYTE = 0x23
 
 # 분해능 설정
 COUNTS_PER_REV = 131072
-STEER_RATIO = 9.0
+STEER_RATIO = 10.0  # motor_node.cpp 의 STEER_RATIO 와 같아야 한다
 
 # 목표 펄스 계산
 DEG_90 = int(90 * (STEER_RATIO * COUNTS_PER_REV / 360.0))
