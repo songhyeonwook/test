@@ -127,35 +127,45 @@ ABI 로 빌드되어 있어 import 가 깨진다. 위처럼 numpy2 호환 버전
 
 ## 라이다 네트워크
 
-MID-360 3대는 유선 `enP8p1s0` 하나에 스위치로 묶여 있고, 드라이버 설정
-(`src/livox_ros_driver2/config/multi_MID360_config.json`)이 호스트 IP 를 라이다마다
-다른 서브넷으로 요구한다. 유선 연결을 DHCP 로 두면 라이다가 붙지 않는다.
+MID-360 3대는 **유선 NIC 3개에 한 대씩 직결**한다. 랜허브로 묶어 NIC 하나에 IP 별칭
+3개를 얹는 구성이 아니다. 드라이버 설정(`src/livox_ros_driver2/config/multi_MID360_config.json`)
+이 호스트 IP 를 라이다마다 다른 서브넷으로 요구하고, 이제 그 서브넷마다 물리 포트가 하나씩
+붙는다. 유선 연결을 DHCP 로 두면 라이다가 붙지 않는다.
 
-| 라이다 | lidar_ip | host_ip |
-|---|---|---|
-| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.50 |
-| livox_front | 192.168.2.102 | 192.168.2.50 |
-| livox_rear | 192.168.3.144 | 192.168.3.50 |
+| 라이다 | lidar_ip | host_ip | NIC |
+|---|---|---|---|
+| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.50 | 전용 포트 1 |
+| livox_front | 192.168.2.102 | 192.168.2.50 | 전용 포트 2 |
+| livox_rear | 192.168.3.144 | 192.168.3.50 | 전용 포트 3 |
 
-한 번만 설정하면 부팅 시 자동 적용된다:
+주소 체계는 rbio TransferRobot 의 Jetson 과 같다 (앱 내장 설정과 호환). 달라진 건 한 NIC 에
+별칭으로 얹지 않고 포트를 하나씩 전용으로 쓴다는 것뿐이라, **JSON 은 바꿀 게 없다** - SDK 는
+`host_ip` 만 보고 bind 한다.
+
+`tools/lidar_net_setup.sh` 가 세 연결 프로필(`livox-top`/`livox-front`/`livox-rear`)을 만든다.
+한 번만 돌리면 부팅 시 자동 적용된다(autoconnect):
 
 ```bash
-sudo nmcli con mod "Wired connection 2" \
-  ipv4.method manual \
-  ipv4.addresses "192.168.1.50/24,192.168.2.50/24,192.168.3.50/24" \
-  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
-sudo nmcli con up "Wired connection 2"
-ip -4 -br addr show enP8p1s0          # 주소 3개 확인
-for ip in 192.168.1.135 192.168.2.102 192.168.3.144; do ping -c1 -W1 $ip; done
+ip -br link                                     # 포트 이름 확인 (장비마다 다르다)
+sudo tools/lidar_net_setup.sh apply <top_if> <front_if> <rear_if>
+     tools/lidar_net_setup.sh status            # 주소·경로·ping 한 번에 확인
 ```
 
-`ipv4.never-default yes` 는 유선이 기본 게이트웨이를 가져가 Wi-Fi 인터넷을 끊는 것을 막는다.
-호스트 IP 는 rbio TransferRobot 의 Jetson 과 동일하게 맞춘 값이다 (앱 내장 설정과 호환).
-인터페이스/연결 이름은 장비마다 다를 수 있다 - `nmcli -t -f NAME,DEVICE con show` 로 확인.
+`status` 의 "인터페이스" 칸에 서로 다른 이름 세 개가 나와야 한다. 같은 이름이 겹치면 아직
+별칭(랜허브) 구성이고, `-` 면 그 host_ip 가 이 PC 에 없다는 뜻이다.
+
+어느 포트에 어느 라이다가 꽂혔는지 모르면 한 대씩 꽂아가며 `status` 로 확인한다. 순서를
+잘못 넣으면 host_ip 와 라이다가 다른 서브넷에 놓여 ping 조차 안 간다 - 인자만 바꿔 다시
+`apply` 하면 된다.
+
+스크립트가 각 연결에 `ipv4.never-default yes` 를 넣는다. 유선 포트가 기본 게이트웨이를
+가져가 Wi-Fi 인터넷을 끊는 것을 막는다 (포트가 3개라 이게 더 중요해졌다).
 
 드라이버가 `bind failed` -> `Init lds lidar fail!` 로 죽으면 십중팔구 이 표가 안 맞는 것이다.
 SDK 는 `host_ip` 를 그대로 bind 하므로, 그 주소가 이 PC 에 없으면 라이다 3대가 통째로 안 붙는다
-(ping 은 되는데 안 붙는 게 특징). `ip -4 -br addr show` 로 세 주소가 다 있는지 먼저 본다.
+(ping 은 되는데 안 붙는 게 특징). 세 대 중 일부만 안 붙으면 `status` 의 `rp_filter` 를 본다.
+포트마다 서브넷이 하나씩이라 strict(1) 로도 정상이지만, 케이블을 잘못 꽂아 한 포트에 두
+서브넷이 섞이면 커널이 조용히 버린다.
 
 **SDK multi-NIC 패치가 필수다.** 순정 Livox-SDK2 는 detection 소켓을 첫 번째 라이다의
 host_ip 하나에만 열어서, 서브넷이 3개면 라이다 1대만 붙는다. `third_party/Livox-SDK2` 에는
