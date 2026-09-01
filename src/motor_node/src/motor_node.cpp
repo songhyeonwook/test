@@ -3,7 +3,8 @@
 //  - 주행 ID 1/3 : Profile Velocity(mode 3), 0x60FF 로 속도 명령
 //  - 조향 ID 2/4 : Profile Position(mode 1), 0x607A 로 목표 각도 명령
 //                  JOY(mode 3) 에서만 Profile Velocity(3), 0x60FF 로 각속도 명령
-//  - 조향은 New set-point(bit4) / ACK(bit12) 핸드셰이크로 확실히 갱신한다
+//  - 조향은 New set-point(bit4) / ACK(bit12) 핸드셰이크로 확실히 갱신한다.
+//    전/후륜은 하나의 상태기로 묶어 같은 주기에 래치한다 (역위상 유지)
 //  - 시동 시 Fault reset 후 조향축을 0 도로 센터링하고 mode 0(정렬)에서 대기한다
 //
 // 토픽
@@ -368,18 +369,18 @@ class MotorNode : public rclcpp::Node
     double meas_vx_ = 0.0, meas_vy_ = 0.0, meas_wz_ = 0.0;
     bool odom_valid_ = false;
 
-    // 조향 셋포인트 핸드셰이크
+    // 조향 셋포인트 핸드셰이크. 전/후륜을 하나의 상태기로 돌려 같은 주기에 래치한다.
     int32_t last_pulse_front_ = 0;
     int32_t last_pulse_rear_ = 0;
-    int toggle_front_ = 0;
-    int toggle_rear_ = 0;
-    int setpoint_retry_front_ = 0;
-    int setpoint_retry_rear_ = 0;
+    int steer_toggle_state_ = 0;
+    int setpoint_retry_cycles_ = 0;
     int32_t setpoint_feedback_front_ = 0;
     int32_t setpoint_feedback_rear_ = 0;
     bool neutral_steering_hold_latched_ = false;
     int32_t neutral_hold_front_pulse_ = 0;
     int32_t neutral_hold_rear_pulse_ = 0;
+    // 애커만 후진 표현 히스테리시스. 회전 중 |vx| 가 작을 때 직전 주행 방향 표현을 유지한다.
+    bool ackermann_reverse_ = false;
 
     std::array<MotorStatus, 5> motor_status_{}; // CANopen node ID 1~4 사용
     SteeringRecoveryState recovery_state_ = SteeringRecoveryState::IDLE;
@@ -443,6 +444,12 @@ class MotorNode : public rclcpp::Node
     static constexpr int STATUS_FRESH_TIMEOUT_MS = 300;
     static constexpr int SETPOINT_RETRY_CYCLES = 50;
     static constexpr int32_t SETPOINT_STALL_PULSES = 1000;
+    // 목표각이 이만큼 이상 바뀌어야 새 set-point 를 낸다. 예전 100 pulse(0.027도)는 MPPI 지령
+    // 노이즈에도 매 주기 핸드셰이크가 리셋되어 ACK 대기만 반복하고 완료되지 못했다.
+    static constexpr double SETPOINT_UPDATE_DEADBAND_DEG = 0.5;
+    // 회전 중 |vx| 가 이보다 작으면 전진/후진 표현을 바꾸지 않는다. 도착지에서 vx 가 0 을 오갈 때
+    // 두 조향축 목표가 매 지령마다 90도씩 뒤집히던 것을 막는다.
+    static constexpr double REVERSE_HYSTERESIS_MPS = 0.02;
     static constexpr int MODE_TRANSITION_TIMEOUT_MS = 30000;
     static constexpr int STEERING_MODE_SETTLE_MS = 1000;
     static constexpr double DRIVE_STOPPED_TOLERANCE_MPS = 0.01;
@@ -867,8 +874,8 @@ class MotorNode : public rclcpp::Node
             // PP 복귀: 셋포인트 핸드셰이크를 현재 위치 기준으로 다시 잡는다.
             last_pulse_front_ = current_steer_pulse_front_;
             last_pulse_rear_ = current_steer_pulse_rear_;
-            toggle_front_ = toggle_rear_ = 0;
-            setpoint_retry_front_ = setpoint_retry_rear_ = 0;
+            steer_toggle_state_ = 0;
+            setpoint_retry_cycles_ = 0;
             setpoint_feedback_front_ = current_steer_pulse_front_;
             setpoint_feedback_rear_ = current_steer_pulse_rear_;
             neutral_steering_hold_latched_ = false;
@@ -1600,10 +1607,8 @@ class MotorNode : public rclcpp::Node
                 }
                 last_pulse_front_ = 0;
                 last_pulse_rear_ = 0;
-                toggle_front_ = 0;
-                toggle_rear_ = 0;
-                setpoint_retry_front_ = 0;
-                setpoint_retry_rear_ = 0;
+                steer_toggle_state_ = 0;
+                setpoint_retry_cycles_ = 0;
                 setpoint_feedback_front_ = 0;
                 setpoint_feedback_rear_ = 0;
                 neutral_steering_hold_latched_ = false;
@@ -1753,12 +1758,8 @@ class MotorNode : public rclcpp::Node
         steer_cmd_deg_rear_ = r_deg;
         const int32_t target_front = deg_to_steer_pulse(f_deg);
         const int32_t target_rear = deg_to_steer_pulse(r_deg);
-        handle_steer_toggle(ID_FRONT_STEER, target_front, last_pulse_front_, toggle_front_,
-                            setpoint_retry_front_, setpoint_feedback_front_,
-                            current_steer_pulse_front_);
-        handle_steer_toggle(ID_REAR_STEER, target_rear, last_pulse_rear_, toggle_rear_,
-                            setpoint_retry_rear_, setpoint_feedback_rear_,
-                            current_steer_pulse_rear_);
+        handle_steer_pair(target_front, target_rear, current_steer_pulse_front_,
+                          current_steer_pulse_rear_);
 
         const int32_t tolerance = deg_to_steer_pulse(3.0);
         const bool target_reached =
@@ -1809,12 +1810,7 @@ class MotorNode : public rclcpp::Node
         steer_cmd_deg_front_ = steer_cmd_deg_rear_ = 0.0;
         if (!both_steering_status_fresh() || steering_fault_active())
             return;
-        handle_steer_toggle(ID_FRONT_STEER, 0, last_pulse_front_, toggle_front_,
-                            setpoint_retry_front_, setpoint_feedback_front_,
-                            current_steer_pulse_front_);
-        handle_steer_toggle(ID_REAR_STEER, 0, last_pulse_rear_, toggle_rear_,
-                            setpoint_retry_rear_, setpoint_feedback_rear_,
-                            current_steer_pulse_rear_);
+        handle_steer_pair(0, 0, current_steer_pulse_front_, current_steer_pulse_rear_);
     }
 
     // 조향을 diff 각도로 고정한 채 차동구동처럼 움직인다.
@@ -1828,12 +1824,8 @@ class MotorNode : public rclcpp::Node
         steer_cmd_deg_rear_ = r_deg;
         const int32_t target_front = deg_to_steer_pulse(f_deg);
         const int32_t target_rear = deg_to_steer_pulse(r_deg);
-        handle_steer_toggle(ID_FRONT_STEER, target_front, last_pulse_front_, toggle_front_,
-                            setpoint_retry_front_, setpoint_feedback_front_,
-                            current_steer_pulse_front_);
-        handle_steer_toggle(ID_REAR_STEER, target_rear, last_pulse_rear_, toggle_rear_,
-                            setpoint_retry_rear_, setpoint_feedback_rear_,
-                            current_steer_pulse_rear_);
+        handle_steer_pair(target_front, target_rear, current_steer_pulse_front_,
+                          current_steer_pulse_rear_);
 
         if (!all_motors_operational()) {
             stop_drive_motors();
@@ -1954,25 +1946,27 @@ class MotorNode : public rclcpp::Node
         }
 
         // 5. 조향 각도 (방향) 계산
-        double front_rad = std::atan2(front_vy, front_vx);
-        double rear_rad = std::atan2(rear_vy, rear_vx);
-
-        // 후진(Reverse) 처리: 바퀴가 90도(PI/2) 이상 뒤로 꺾이려고 하면,
-        // 바퀴 각도를 정면으로 돌리고 모터 속도를 마이너스로 뒤집는다.
-        if (front_rad > M_PI / 2.0) {
-            front_rad -= M_PI;
-            front_speed *= -1.0;
-        } else if (front_rad < -M_PI / 2.0) {
-            front_rad += M_PI;
-            front_speed *= -1.0;
-        }
-
-        if (rear_rad > M_PI / 2.0) {
-            rear_rad -= M_PI;
-            rear_speed *= -1.0;
-        } else if (rear_rad < -M_PI / 2.0) {
-            rear_rad += M_PI;
-            rear_speed *= -1.0;
+        // 바퀴 속도 벡터 (vx, vy) 는 "각도 φ 로 전진" 또는 "φ±180도로 후진" 두 표현이 있고,
+        // |φ| <= 90도가 되는 쪽(= vx 부호)을 쓴다. 다만 회전 중 |vx| 가 REVERSE_HYSTERESIS_MPS
+        // 보다 작으면 직전 표현을 유지한다. 도착지에서 velocity_smoother 가 vx 를 0 을 지나
+        // 램프시키는 동안 wz 가 남으면 두 표현이 매 지령마다 바뀌어 전/후륜 목표가 90도씩
+        // 뒤집혔고, 13 deg/s 조향은 그걸 따라가지 못해 한 축만 도는 형상이 됐다.
+        // 히스테리시스 구간에서는 vx 성분 부호가 틀릴 수 있지만 크기가 0.02 m/s 미만이고,
+        // 회전을 만드는 vy 성분의 부호는 어느 표현에서도 맞다.
+        if (safe_wz == 0.0 || std::abs(safe_vx) >= REVERSE_HYSTERESIS_MPS)
+            ackermann_reverse_ = safe_vx < 0.0;
+        const double abs_vx = std::abs(safe_vx);
+        double front_rad = 0.0;
+        double rear_rad = 0.0;
+        if (ackermann_reverse_) {
+            // 후진 표현: -|v|·(cosφ, sinφ) = (vx, vy)  →  φ = atan2(-vy, -vx)
+            front_rad = std::atan2(-front_vy, abs_vx);
+            rear_rad = std::atan2(-rear_vy, abs_vx);
+            front_speed = -front_speed;
+            rear_speed = -rear_speed;
+        } else {
+            front_rad = std::atan2(front_vy, abs_vx);
+            rear_rad = std::atan2(rear_vy, abs_vx);
         }
 
         // 기구 끝단을 누르지 않도록 조향 한계에 여유를 둔다.
@@ -1995,10 +1989,7 @@ class MotorNode : public rclcpp::Node
             static_cast<int32_t>(std::llround(current_steer_angle_front_ * pulses_per_radian));
         const int32_t actual_rear_pulse =
             static_cast<int32_t>(std::llround(current_steer_angle_rear_ * pulses_per_radian));
-        handle_steer_toggle(ID_FRONT_STEER, pulse_front, last_pulse_front_, toggle_front_,
-                            setpoint_retry_front_, setpoint_feedback_front_, actual_front_pulse);
-        handle_steer_toggle(ID_REAR_STEER, pulse_rear, last_pulse_rear_, toggle_rear_,
-                            setpoint_retry_rear_, setpoint_feedback_rear_, actual_rear_pulse);
+        handle_steer_pair(pulse_front, pulse_rear, actual_front_pulse, actual_rear_pulse);
 
         const bool straight_command = safe_wz == 0.0;
         const bool steering_aligned = front_error_rad <= DRIVE_STEERING_TOLERANCE_RAD &&
@@ -2016,18 +2007,19 @@ class MotorNode : public rclcpp::Node
             return;
         }
 
-        // 회전 주행은 조향과 구동을 동시에 수행하되, 각 축의 조향 오차만큼
-        // 구동 속도를 줄인다. 오차가 90도 이상이면 해당 축은 정지한다.
+        // 회전 주행은 조향과 구동을 동시에 수행하되, 두 축 중 더 큰 조향 오차로 두 구동축을
+        // 같이 줄인다. 축별로 따로 줄이면 오차가 90도를 넘은 축만 서고 다른 축은 굴러
+        // 전/후 바퀴가 따로 도는 것처럼 보인다. 오차가 90도 이상이면 둘 다 정지한다.
         if (!straight_command) {
-            const double front_alignment_scale = std::clamp(std::cos(front_error_rad), 0.0, 1.0);
-            const double rear_alignment_scale = std::clamp(std::cos(rear_error_rad), 0.0, 1.0);
-            front_speed *= front_alignment_scale;
-            rear_speed *= rear_alignment_scale;
+            const double alignment_scale = std::clamp(
+                std::min(std::cos(front_error_rad), std::cos(rear_error_rad)), 0.0, 1.0);
+            front_speed *= alignment_scale;
+            rear_speed *= alignment_scale;
 
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                                 "Driving while steering: scale(F/R)=%.2f/%.2f "
+                                 "Driving while steering: scale=%.2f "
                                  "target(F/R)=%.1f/%.1f deg actual(F/R)=%.1f/%.1f deg",
-                                 front_alignment_scale, rear_alignment_scale, front_steer_deg,
+                                 alignment_scale, front_steer_deg,
                                  rear_steer_deg, current_steer_angle_front_ * RAD2DEG,
                                  current_steer_angle_rear_ * RAD2DEG);
         }
@@ -2138,60 +2130,85 @@ class MotorNode : public rclcpp::Node
         }
     }
 
-    void handle_steer_toggle(int id, int32_t target_pulse, int32_t& last_pulse, int& state,
-                             int& retry_cycles, int32_t& feedback_reference, int32_t actual_pulse)
+    // 전/후륜 조향 set-point 핸드셰이크를 하나의 상태기로 돌린다.
+    // 축별로 따로 돌리면 TPDO 위상 차이로 두 축이 새 목표를 래치하는 순간이 어긋나고, 도착지처럼
+    // 연속 목표가 90도씩 뒤집히는 상황에서 한 축만 새 목표를 잡아 역위상이 깨졌다. 두 축의 ACK 를
+    // 함께 기다려 같은 주기에 상승 에지를 만들고, 한쪽이라도 멈춰 있으면 양쪽을 같이 다시 보낸다.
+    void handle_steer_pair(int32_t target_front, int32_t target_rear, int32_t actual_front,
+                           int32_t actual_rear)
     {
         const auto pulse_delta = [](int32_t lhs, int32_t rhs) {
             return std::llabs(static_cast<long long>(lhs) - static_cast<long long>(rhs));
         };
-        const bool target_changed = pulse_delta(target_pulse, last_pulse) > 100;
+        const long long update_deadband = deg_to_steer_pulse(SETPOINT_UPDATE_DEADBAND_DEG);
+        const bool target_changed =
+            pulse_delta(target_front, last_pulse_front_) > update_deadband ||
+            pulse_delta(target_rear, last_pulse_rear_) > update_deadband;
         if (target_changed) {
-            last_pulse = target_pulse;
-            feedback_reference = actual_pulse;
-            retry_cycles = 0;
-            state = 1;
+            last_pulse_front_ = target_front;
+            last_pulse_rear_ = target_rear;
+            setpoint_feedback_front_ = actual_front;
+            setpoint_feedback_rear_ = actual_rear;
+            setpoint_retry_cycles_ = 0;
+            steer_toggle_state_ = 1;
         }
 
-        switch (state) {
+        const bool front_ack = setpoint_acknowledged(ID_FRONT_STEER);
+        const bool rear_ack = setpoint_acknowledged(ID_REAR_STEER);
+        const auto send_both = [this](uint16_t cw) {
+            send_steer_pdo(ID_FRONT_STEER, last_pulse_front_, cw);
+            send_steer_pdo(ID_REAR_STEER, last_pulse_rear_, cw);
+        };
+
+        switch (steer_toggle_state_) {
         case 1:
-            // 이전 set-point ACK를 내리기 전까지 LOW를 유지한다.
-            send_steer_pdo(id, last_pulse, 0x000F);
-            if (!setpoint_acknowledged(id))
-                state = 2;
+            // 두 축 모두 이전 set-point ACK 가 내려간 뒤에야 같은 주기에 올린다.
+            send_both(0x000F);
+            if (!front_ack && !rear_ack)
+                steer_toggle_state_ = 2;
             break;
         case 2:
-            // ACK가 올라올 때까지 New set-point bit를 HIGH로 유지한다.
-            send_steer_pdo(id, last_pulse, 0x003F);
-            if (setpoint_acknowledged(id))
-                state = 3;
+            // 두 축 모두 ACK 가 올라올 때까지 New set-point bit 를 HIGH 로 유지한다.
+            send_both(0x003F);
+            if (front_ack && rear_ack)
+                steer_toggle_state_ = 3;
             break;
         case 3:
-            // ACK가 다시 내려가야 다음 목표도 확실한 상승 에지를 만들 수 있다.
-            send_steer_pdo(id, last_pulse, 0x000F);
-            if (!setpoint_acknowledged(id)) {
-                state = 0;
-                retry_cycles = 0;
-                feedback_reference = actual_pulse;
+            // ACK 가 다시 내려가야 다음 목표도 확실한 상승 에지를 만들 수 있다.
+            send_both(0x000F);
+            if (!front_ack && !rear_ack) {
+                steer_toggle_state_ = 0;
+                setpoint_retry_cycles_ = 0;
+                setpoint_feedback_front_ = actual_front;
+                setpoint_feedback_rear_ = actual_rear;
             }
             break;
         default: {
-            send_steer_pdo(id, last_pulse, 0x000F);
-            const bool target_reached =
-                pulse_delta(last_pulse, actual_pulse) <=
+            send_both(0x000F);
+            const long long reached_tol =
                 static_cast<long long>(STEER_RATIO * ENCODER_PPR * 3.0 / 360.0);
-            if (target_reached) {
-                retry_cycles = 0;
-                feedback_reference = actual_pulse;
+            const bool front_reached = pulse_delta(last_pulse_front_, actual_front) <= reached_tol;
+            const bool rear_reached = pulse_delta(last_pulse_rear_, actual_rear) <= reached_tol;
+            if (front_reached && rear_reached) {
+                setpoint_retry_cycles_ = 0;
+                setpoint_feedback_front_ = actual_front;
+                setpoint_feedback_rear_ = actual_rear;
                 break;
             }
 
-            if (++retry_cycles >= SETPOINT_RETRY_CYCLES) {
-                const bool stalled =
-                    pulse_delta(actual_pulse, feedback_reference) < SETPOINT_STALL_PULSES;
-                feedback_reference = actual_pulse;
-                retry_cycles = 0;
-                if (stalled)
-                    state = 1;
+            if (++setpoint_retry_cycles_ >= SETPOINT_RETRY_CYCLES) {
+                // 목표에 못 미친 축이 1초 동안 거의 안 움직였으면 양쪽을 함께 다시 보낸다.
+                const bool front_stalled =
+                    !front_reached &&
+                    pulse_delta(actual_front, setpoint_feedback_front_) < SETPOINT_STALL_PULSES;
+                const bool rear_stalled =
+                    !rear_reached &&
+                    pulse_delta(actual_rear, setpoint_feedback_rear_) < SETPOINT_STALL_PULSES;
+                setpoint_feedback_front_ = actual_front;
+                setpoint_feedback_rear_ = actual_rear;
+                setpoint_retry_cycles_ = 0;
+                if (front_stalled || rear_stalled)
+                    steer_toggle_state_ = 1;
             }
             break;
         }
@@ -2209,16 +2226,25 @@ class MotorNode : public rclcpp::Node
         const int32_t actual_rear =
             static_cast<int32_t>(std::llround(current_steer_angle_rear_ * pulses_per_radian));
         if (!neutral_steering_hold_latched_) {
-            neutral_hold_front_pulse_ = actual_front;
-            neutral_hold_rear_pulse_ = actual_rear;
+            // 두 축을 각자 실측각에 얼리면 스윙 도중 멈췄을 때 전/후륜이 무관한 각도로 남는다.
+            // 두 실측각 크기의 평균으로 역위상 쌍 (+θ, -θ) 을 만들어 잡는다. 부호는 더 많이
+            // 꺾여 있는 축을 따라, 움직임을 최소로 하면서 역위상만 복원한다.
+            const double front_deg = current_steer_angle_front_ * RAD2DEG;
+            const double rear_deg = current_steer_angle_rear_ * RAD2DEG;
+            const double theta = std::min((std::abs(front_deg) + std::abs(rear_deg)) / 2.0,
+                                          max_steering_angle_rad_ * RAD2DEG);
+            const double front_sign = (std::abs(front_deg) >= std::abs(rear_deg))
+                                          ? (front_deg >= 0.0 ? 1.0 : -1.0)
+                                          : (rear_deg >= 0.0 ? -1.0 : 1.0);
+            neutral_hold_front_pulse_ = deg_to_steer_pulse(front_sign * theta);
+            neutral_hold_rear_pulse_ = deg_to_steer_pulse(-front_sign * theta);
+            steer_cmd_deg_front_ = front_sign * theta;
+            steer_cmd_deg_rear_ = -front_sign * theta;
             neutral_steering_hold_latched_ = true;
         }
 
-        handle_steer_toggle(ID_FRONT_STEER, neutral_hold_front_pulse_, last_pulse_front_,
-                            toggle_front_, setpoint_retry_front_, setpoint_feedback_front_,
-                            actual_front);
-        handle_steer_toggle(ID_REAR_STEER, neutral_hold_rear_pulse_, last_pulse_rear_, toggle_rear_,
-                            setpoint_retry_rear_, setpoint_feedback_rear_, actual_rear);
+        handle_steer_pair(neutral_hold_front_pulse_, neutral_hold_rear_pulse_, actual_front,
+                          actual_rear);
     }
 
     // --- 콜백 ---
