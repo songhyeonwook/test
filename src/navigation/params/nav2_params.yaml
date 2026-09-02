@@ -136,8 +136,11 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.60
-      yaw_goal_tolerance: 0.90
+      # 침대 옆 정렬에서는 위치만 들어오고 차체가 덜 꺾인 상태를 성공으로
+      # 처리하면 안 된다. 0.60m / 0.90rad(약 52도)였던 값을 실제 정렬용으로
+      # 좁히되, 실차 localization 오차를 감안해 과도하게 빡빡하게 두지는 않는다.
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.08  # 약 4.6도: 침대와 수평 정렬될 때까지 성공 처리 금지
     # MPPI + Ackermann 모델: 후륜 역조향(조향식) 차량에 맞는 최소회전반경
     # 제약을 지키면서, local costmap 의 동적 장애물을 롤아웃 비용으로 직접
     # 회피한다. RPP 는 경로 추종만 하고 회피는 못 해서 교체했다.
@@ -145,33 +148,40 @@ controller_server:
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
       # 지평선은 최소한 "차체 길이 + 최소회전반경 선회호" 를 담아야 한다.
-      # 차체 1.62m, 90도 선회 호 길이 = 1.30 * pi/2 = 2.04m.
-      # 130 * 0.1s = 13s -> 0.2m/s 로 2.6m. 회피 기동이 롤아웃 안에 들어온다.
-      # (이전 60스텝 = 1.2m 는 차체보다도 짧아서 회피 대신 감속만 나왔다)
-      time_steps: 130
+      # 차체 1.62m, 90도 선회 호 길이 = 0.80 * pi/2 = 1.26m.
+      # 100 * 0.1s = 10s -> 0.2m/s 로 2.0m. 너무 긴 롤아웃에서 벽 충돌이
+      # 누적되는 현상을 줄이면서 차체 길이보다 긴 회피 지평선을 유지한다.
+      time_steps: 100
       model_dt: 0.1          # = 1/controller_frequency (MPPI 권장)
-      batch_size: 600        # batch*steps 를 이전(1200*60=72000)과 비슷한 78000 으로
+      batch_size: 800        # 총 샘플 80000으로 계산량은 유지하고 궤적 다양성은 늘린다
       iteration_count: 1
-      vx_std: 0.08
+      # 모든 샘플 궤적이 충돌한 한 번의 결과만으로 FollowPath를 중단하지 않고,
+      # 새 노이즈 궤적을 최대 5회 다시 생성해 순간 장애물에서 멈칫하는 빈도를 줄인다.
+      retry_attempt_limit: 5
+      # 전진만으로 최종 자세를 다시 연결할 수 없는 좁은 정렬 구간에서 짧은
+      # 후진 기동도 샘플링한다. 평상시에는 PreferForwardCritic이 전진을 우선한다.
+      vx_std: 0.10
       vy_std: 0.0
-      wz_std: 0.2
+      wz_std: 0.10           # 저속에서 좌우 최대조향으로 튀는 노이즈를 억제
       vx_max: 0.20
-      vx_min: 0.0            # 전진 전용. 플래너(DUBIN)와 일치
+      vx_min: -0.10          # 최종 정렬/막힌 커브 복구용 저속 후진 허용
       vy_max: 0.0
-      wz_max: 0.30           # motor_node max_angular_speed(0.3) 와 일치. 넘기면 거기서 잘린다
+      wz_max: 0.25           # 0.2m/s / 최소회전반경 0.80m = 0.25rad/s
       ax_max: 0.3
       ax_min: -0.3
       ay_max: 0.0
       az_max: 0.5
       motion_model: "Ackermann"
       AckermannConstraints:
-        min_turning_r: 1.30
+        # 4WS 역위상, 축간거리 1.29m, 최대조향 45deg의 이론값은
+        # 1.29/(2*tan45)=0.645m. 끝단 포화를 피할 여유를 두어 0.80m 사용.
+        min_turning_r: 0.80
       prune_distance: 2.0
       transform_tolerance: 0.3
       temperature: 0.3
       gamma: 0.015
       visualize: false
-      regenerate_noises: true   # 동적 장애물 환경 권장값. 노이즈 재사용을 막는다
+      regenerate_noises: false  # 매 주기 무작위 조향 방향이 뒤집히는 현상을 억제
       TrajectoryVisualizer:
         trajectory_step: 5
         time_step: 3
@@ -186,17 +196,22 @@ controller_server:
         enabled: true
         cost_power: 1
         cost_weight: 5.0
-        threshold_to_consider: 1.4
+        # 최소회전반경 0.8m인 차가 마지막 순간이 아니라 선회 공간이 있을 때부터
+        # goal 위치로 수렴하도록 한다.
+        threshold_to_consider: 1.8
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 3.0
-        threshold_to_consider: 0.5
+        # 기존 0.5m 안쪽부터는 4WS Ackermann이 목표 yaw를 만들기에 너무 늦었다.
+        # 1.8m 전부터 목표 방향을 강하게 반영해 침대 앞 최종 선회를 미리 시작한다.
+        cost_weight: 10.0
+        threshold_to_consider: 1.8
       PreferForwardCritic:
         enabled: true
         cost_power: 1
         cost_weight: 5.0
-        threshold_to_consider: 0.5
+        # 일반 구간은 전진 우선, 마지막 1.8m에서는 Reeds-Shepp의 짧은 후진을 허용.
+        threshold_to_consider: 1.8
       # 장애물 비용. 직사각형 차체(1.62x0.95)라 원 근사 대신 footprint 검사.
       CostCritic:
         enabled: true
@@ -213,7 +228,8 @@ controller_server:
         cost_weight: 14.0
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
-        threshold_to_consider: 0.5
+        # goal 부근에서는 경로선에 매달리기보다 위치/yaw critic으로 넘긴다.
+        threshold_to_consider: 0.8
         offset_from_furthest: 20
         use_path_orientations: true
       PathFollowCritic:
@@ -227,9 +243,11 @@ controller_server:
         cost_power: 1
         cost_weight: 2.0
         offset_from_furthest: 4
-        threshold_to_consider: 0.5
+        threshold_to_consider: 0.8
         max_angle_to_furthest: 1.0
-        mode: 0
+        # Smac Reeds-Shepp 경로가 가진 전진/후진 방향을 그대로 따른다.
+        # 0은 전진 전용이며, 2는 feasible path orientation을 사용한다.
+        mode: 2
 
 local_costmap:
   local_costmap:
@@ -268,12 +286,17 @@ local_costmap:
           obstacle_min_range: 0.0
           raytrace_max_range: 8.0
           raytrace_min_range: 0.0
-          min_obstacle_height: -0.5
+          # sliced cloud가 이미 지면/천장을 제거하지만 costmap에서도 같은
+          # 높이 제한을 한 번 더 적용해 바닥 노이즈를 장애물로 만들지 않는다.
+          min_obstacle_height: 0.20
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.95
+        # 실제 footprint의 inscribed radius가 약 0.48m다. 이보다 작은 radius는
+        # 벽 접근 비용 경사를 없애 MPPI가 커브 안쪽을 자르게 만든다. 충돌 영역
+        # 밖에 약 12cm의 가파른 경사만 두어 벽 접근은 막되 통로 전체는 잠그지 않는다.
+        cost_scaling_factor: 10.0
+        inflation_radius: 0.60
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -290,6 +313,9 @@ global_costmap:
       footprint: "[[0.81, 0.48], [0.81, -0.48], [-0.81, -0.48], [-0.81, 0.48]]"
       resolution: 0.05
       track_unknown_space: true
+      # 전역/로컬이 서로 다른 장애물 형상을 보면 global path는 통과 가능하지만
+      # MPPI는 충돌로 판단하는 모순이 생긴다. 두 costmap 모두 지면/자차가 제거된
+      # 동일한 3-LiDAR sliced cloud를 사용한다.
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -298,22 +324,30 @@ global_costmap:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
         footprint_clearing_enabled: True
+        combination_method: 1
         observation_sources: merged_cloud
         merged_cloud:
           topic: /livox_merge/merged_pointcloud_sliced
+          sensor_frame: base_link
           data_type: "PointCloud2"
           marking: True
           clearing: True
-          obstacle_max_range: 6.0
+          # 자차 영역은 merge 노드의 crop(0.90 x 0.55m)으로 이미 제거된다.
           obstacle_min_range: 0.0
-          raytrace_max_range: 8.0
+          obstacle_max_range: 4.0
           raytrace_min_range: 0.0
-          min_obstacle_height: -0.5
+          raytrace_max_range: 6.0
+          min_obstacle_height: 0.20
           max_obstacle_height: 2.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.95
+        # 전역 플래너가 goal 쪽 최단거리로 벽에 붙지 않고 통로 중앙을 선택하도록
+        # local보다 넓고 완만한 거리 비용장을 만든다. 이 영역은 비치명적 비용이며
+        # 실제 충돌 판정은 기존 직사각형 footprint가 그대로 담당한다.
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.75
       always_send_full_costmap: True
 
 map_server:
@@ -333,32 +367,48 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 3.0
+    # BT가 1Hz로 경로 유효성을 검사하므로 같은 기준을 사용한다.
+    expected_planner_frequency: 1.0
     use_sim_time: False
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
-      tolerance: 1.00
+      # controller goal 허용 오차와 맞춘다. 1m 떨어진 근사 경로를 성공으로
+      # 반환하면 controller는 그 경로 끝에서 실제 goal을 만족하지 못한다.
+      tolerance: 0.25
       downsample_costmap: false
       allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
-      max_planning_time: 4.0
-      motion_model_for_search: "DUBIN"
+      # Reeds-Shepp은 전/후진 분기까지 탐색하므로 좁은 최종 정렬에서 여유를 준다.
+      max_planning_time: 6.0
+      # DUBIN은 전진만 가능해 좁은 침대 진입부에서 회전 도중 현재 자세로부터
+      # goal 자세를 다시 연결하지 못했다. REEDS_SHEPP은 필요할 때만 짧은
+      # 후진-전진 cusp를 사용해 Ackermann 차량의 최종 방향 정렬을 완성한다.
+      motion_model_for_search: "REEDS_SHEPP"
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
-      analytic_expansion_max_length: 3.0
-      # 반드시 MPPI 의 AckermannConstraints.min_turning_r 과 같은 값이어야 한다.
+      # 권장 범위인 최소회전반경의 4~5배. goal 근처의 곡률 연결에 사용된다.
+      analytic_expansion_max_length: 4.0
+      # 반드시 MPPI 및 motor_node의 Ackermann 최소반경과 같아야 한다.
       # 다르면 플래너가 컨트롤러가 못 따라가는 경로를 내고 코너에서 컷이 난다.
-      # (실측 (1.29/2)/tan55 = 0.45m 라 1.30 은 보수값)
-      minimum_turning_radius: 1.30
-      reverse_penalty: 100.0
-      change_penalty: 0.0
+      # 4WS 역위상 이론 최소값 0.645m에서 조향 끝단 여유를 둔 값이다.
+      minimum_turning_radius: 0.80
+      # 후진은 가능하게 하되 일반 주행에서 남용하지 않고, 전진만으로 불가능한
+      # 마지막 정렬/회복 구간에서만 선택하도록 비용을 준다.
+      reverse_penalty: 2.0
+      # 좌/우 선회 방향을 짧게 반복하는 지그재그 해를 약하게 억제한다.
+      change_penalty: 0.1
       non_straight_penalty: 1.05
-      cost_penalty: 2.0
+      # goal까지의 단순 최단거리보다 inflation 비용이 낮은 통로 중앙을 우선한다.
+      # 너무 크게 올리면 우회가 과해지므로 기본 2.0에서 보수적으로 3.5만 적용한다.
+      cost_penalty: 3.5
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
-      cache_obstacle_heuristic: true
+      # global obstacle layer가 사람/침대 주변 포인트로 계속 변한다. 같은 goal의
+      # 이전 장애물 휴리스틱을 재사용하면 clear 후에도 낡은 탐색 편향이 남을 수
+      # 있으므로 동적 재계획에서는 매번 현재 costmap으로 다시 계산한다.
+      cache_obstacle_heuristic: false
       smooth_path: true
 
 smoother_server:
@@ -411,7 +461,8 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # motor_node 한계(max_linear 0.2, max_angular 0.3)와 동일하게 둔다
     max_velocity: [0.20, 0.0, 0.30]
-    min_velocity: [0.0, 0.0, -0.30]
+    # MPPI가 만든 저속 후진 명령을 0으로 잘라버리지 않도록 동일한 하한 적용.
+    min_velocity: [-0.10, 0.0, -0.30]
     max_accel: [0.3, 0.0, 0.5]
     max_decel: [-0.3, 0.0, -0.5]
     odom_topic: "odom"
