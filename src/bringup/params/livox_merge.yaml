@@ -29,6 +29,12 @@
     # FAST-LIO 는 이걸 스캔 시작으로 보고 IMU 와 동기화한다.
     stamp_from_input: true
 
+    # 세 MID-360 장치 시계가 완전히 동기화되지 않아도 FAST-LIO 가 사용하는
+    # 상단 IMU/라이다 시계 한 축에 점 시간을 맞춘다. cloud_in3 이 top 이다.
+    # 패키지 기본값은 false 이므로 다른 기존 구성에는 영향을 주지 않는다.
+    align_timestamps: true
+    timestamp_reference_cloud: 3
+
     # cloud_out_sliced = Nav2 costmap 의 장애물 입력.
     slice_enable: true
     # z_min 0.15 = 지면 위 15cm. 더 낮추면 바닥 반사가 장애물로 찍힌다.

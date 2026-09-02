@@ -24,16 +24,24 @@ private:
   void subCallbackCloudIn(sensor_msgs::msg::PointCloud2::SharedPtr msg, int idx);
   void publishPointcloud(sensor_msgs::msg::PointCloud2 & cloud, const rclcpp::Time & stamp);
   sensor_msgs::msg::PointCloud2 sliceCloud(const sensor_msgs::msg::PointCloud2 & in) const;
+  bool alignPointTimestamps(
+    sensor_msgs::msg::PointCloud2 & cloud,
+    int64_t input_base_ns,
+    int64_t aligned_base_ns);
+  void warnIfInputStale();
 
   std::string param_frame_target_;
   int param_clouds_;
   double param_hz_;
   bool param_sync_all_;
   bool param_stamp_from_input_;
+  bool param_align_timestamps_;
+  int param_timestamp_reference_cloud_;
   bool param_slice_enable_;
   double param_slice_z_min_, param_slice_z_max_;
   double param_crop_half_x_, param_crop_half_y_;
 
+  // 출력용. 입력은 RELIABLE 로 따로 잡는다(생성자 참조).
   rclcpp::SensorDataQoS sensor_qos;
 
   std::array<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr, kMaxClouds> sub_cloud_in;
@@ -42,6 +50,7 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
 
   std::array<sensor_msgs::msg::PointCloud2, kMaxClouds> cloud_in;
+  std::array<rclcpp::Time, kMaxClouds> cloud_received_at;
   // 마지막으로 발행한 뒤 새 메시지가 들어왔는지. sync_all 이면 이게 전부 true 일
   // 때만 발행한다(같은 프레임을 두 번 쓰거나 건너뛰지 않게).
   std::array<bool, kMaxClouds> cloud_fresh {};
