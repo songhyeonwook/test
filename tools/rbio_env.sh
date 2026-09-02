@@ -24,9 +24,17 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 # --- 라이다는 hw 가 띄운다 (앱 자동 실행 끔) ---
 export TRANSFER_ROBOT_EXTERNAL_LIVOX_DRIVER=1
 export TRANSFER_ROBOT_LIVOX_SDK_LIBRARY_DIR=/usr/local/lib   # hw 는 SDK 를 /usr/local 에 설치
+# 앱이 드라이버를 직접 띄우게 되더라도(EXTERNAL=0) hw 와 같은 JSON(포트별 host_ip) 을 쓰게
+export TRANSFER_ROBOT_LIVOX_CONFIG_PATH="${HW_WS}/src/livox_ros_driver2/config/multi_MID360_config.json"
 
 # --- 나중에 rbio 앱(UI)까지 붙일 때 앱이 hw 토픽/외부파라미터를 쓰도록 ---
-export TRANSFER_ROBOT_LIDAR_2_TOPIC=/livox/lidar_192_168_2_102
+# 앱은 /livox/lidar* 토픽을 기본으로 Livox CustomMsg 로 구독한다. hw 드라이버는 xfer_format=0
+# (PointCloud2) 로 내므로 포맷을 명시한다 - 빠뜨리면 타입이 안 맞아 앱이 라이다를 못 본다.
+#   LiDAR 1 = 192.168.1.135 livox_top (앱 기본 토픽), 2 = 192.168.2.102 livox_front, 3 = 192.168.3.144 livox_rear
+export TRANSFER_ROBOT_LIDAR_1_FORMAT=pointcloud2
+export TRANSFER_ROBOT_LIDAR_2_FORMAT=pointcloud2
+export TRANSFER_ROBOT_LIDAR_3_FORMAT=pointcloud2
+export TRANSFER_ROBOT_LIDAR_2_TOPIC=/livox/lidar_192_168_2_102   # rbio 는 /livox/lidar 로 remap 했었다
 export TRANSFER_ROBOT_LIDAR_2_X_M=0.697
 export TRANSFER_ROBOT_LIDAR_2_Y_M=0.350
 export TRANSFER_ROBOT_LIDAR_2_Z_M=0.320

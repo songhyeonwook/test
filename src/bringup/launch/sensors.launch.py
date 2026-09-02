@@ -5,9 +5,10 @@
   pointcloud_concat (3대를 base_link 기준 하나로 병합)
 
 라이다는 3대이고 셋 다 병합에 들어간다. top 은 IMU 공급원이기도 하다.
-  192.168.1.135  livox_top     IMU 공급 + cloud_in3
-  192.168.2.102  livox_front   cloud_in1
-  192.168.3.144  livox_rear    cloud_in2
+포트 하나에 라이다 하나 (rbio 실차와 동일, tools/lidar_net.sh status 로 확인):
+  192.168.1.135  livox_top    host 192.168.1.50  enxb0386cf17bd0  IMU 공급 + cloud_in3
+  192.168.2.102  livox_front  host 192.168.2.50  enP8p1s0         cloud_in1
+  192.168.3.144  livox_rear   host 192.168.3.50  enxb0386cf1873c  cloud_in2
 
 드라이버는 xfer_format=0 (PointCloud2) 으로 낸다. 점마다 절대시각 timestamp 가
 붙어 있어서 3대를 합쳐도 점 시간이 한 축 위에 놓인다.

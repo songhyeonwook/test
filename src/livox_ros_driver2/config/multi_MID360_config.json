@@ -18,6 +18,7 @@
         "push_msg_port": 56201,
         "point_data_port": 56301,
         "imu_data_port": 56401,
+        "log_data_ip": "",
         "log_data_port": 56501
       },
       {
@@ -27,6 +28,7 @@
         "push_msg_port": 56201,
         "point_data_port": 56301,
         "imu_data_port": 56401,
+        "log_data_ip": "",
         "log_data_port": 56501
       },
       {
@@ -36,6 +38,7 @@
         "push_msg_port": 56201,
         "point_data_port": 56301,
         "imu_data_port": 56401,
+        "log_data_ip": "",
         "log_data_port": 56501
       }
     ]

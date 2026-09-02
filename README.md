@@ -12,10 +12,12 @@ hw/
 │   ├── pointcloud_concatenate_ros2/ 라이다 3대를 TF 로 base_link 기준 병합
 │   ├── fast_lio_localization/      FAST-LIO 측위 + ICP 전역정합 + tf_2d 평면화
 │   ├── motor_node/                 CAN 4WS 구동. /mode 0 정렬·1 애커만·2 디프, /odom (4WS 휠 오도메트리)
+│   ├── lift_node/                  RS232 리프트 제어보드. lift/vertical·lift/horizontal (Int32 0 정지/1/2),
+│   │                                lift_node/move 액션 (시간 기반 구동·완료 판정)
 │   ├── navigation/                 ★ URDF/TF · Nav2 파라미터 · behavior tree · 맵
 │   └── bringup/                    ★ 전체 launch, bag 재생 테스트
 ├── third_party/Livox-SDK2/         colcon 대상 아님. multi-NIC 패치 적용됨, cmake --install 필요
-├── tools/                          check_frames.py, check_lidar_z.py, check_lidar_overlap.py, ply_to_pcd.py
+├── tools/                          lidar_net.sh(라이다 포트/IP), can_setup.sh, check_frames.py, check_lidar_z.py, check_lidar_overlap.py, ply_to_pcd.py
 └── bag/                            rosbag 기록 위치 (git 제외)
 ```
 
@@ -127,49 +129,48 @@ ABI 로 빌드되어 있어 import 가 깨진다. 위처럼 numpy2 호환 버전
 
 ## 라이다 네트워크
 
-MID-360 3대는 **유선 NIC 3개에 한 대씩 직결**한다. 랜허브로 묶어 NIC 하나에 IP 별칭
-3개를 얹는 구성이 아니다. 드라이버 설정(`src/livox_ros_driver2/config/multi_MID360_config.json`)
-이 호스트 IP 를 라이다마다 다른 서브넷으로 요구하고, 이제 그 서브넷마다 물리 포트가 하나씩
-붙는다. 유선 연결을 DHCP 로 두면 라이다가 붙지 않는다.
+rbio 실차(TransferRobot-Hanyang 의 Jetson)와 같은 배치다: **유선 포트 하나에 라이다 하나**,
+포트마다 서브넷이 다르고 host_ip 는 포트별로 하나씩 고정한다. 드라이버 설정
+(`src/livox_ros_driver2/config/multi_MID360_config.json`)은 rbio 의 `MID360_config_all.json` 과
+lidar_ip / host_ip / UDP 포트(라이다측 56100~56500, 호스트측 56101~56501)가 같다.
+SDK 는 `host_ip` 를 글자 그대로 bind 하므로 표의 host_ip 가 이 PC 의 포트에 실제로 붙어 있어야 한다.
 
-| 라이다 | lidar_ip | host_ip | NIC |
-|---|---|---|---|
-| livox_top (IMU 공급) | 192.168.1.135 | 192.168.1.50 | 전용 포트 1 |
-| livox_front | 192.168.2.102 | 192.168.2.50 | 전용 포트 2 |
-| livox_rear | 192.168.3.144 | 192.168.3.50 | 전용 포트 3 |
+| 포트(NIC) | 라이다 | lidar_ip | host_ip | 비고 |
+|---|---|---|---|---|
+| `enxb0386cf17bd0` (USB) | livox_top | 192.168.1.135 | 192.168.1.50 | IMU 공급, 앱 LiDAR 1 |
+| `enP8p1s0` (내장) | livox_front | 192.168.2.102 | 192.168.2.50 | 앱 LiDAR 2 (rbio 는 `/livox/lidar` 로 remap) |
+| `enxb0386cf1873c` (USB) | livox_rear | 192.168.3.144 | 192.168.3.50 | 앱 LiDAR 3 |
 
-주소 체계는 rbio TransferRobot 의 Jetson 과 같다 (앱 내장 설정과 호환). 달라진 건 한 NIC 에
-별칭으로 얹지 않고 포트를 하나씩 전용으로 쓴다는 것뿐이라, **JSON 은 바꿀 게 없다** - SDK 는
-`host_ip` 만 보고 bind 한다.
+`enx…` 는 USB 이더넷 어댑터의 MAC 기반 이름이라 어댑터를 바꾸면 이름이 바뀐다 (`ip -br link` 로 확인).
+라이다는 자기 서브넷의 host_ip 로만 응답하므로 **케이블을 다른 포트에 꽂으면 안 붙는다**
+(192.168.1.135 는 반드시 192.168.1.50 이 있는 포트에).
 
-`tools/lidar_net_setup.sh` 가 세 연결 프로필(`livox-top`/`livox-front`/`livox-rear`)을 만든다.
-한 번만 돌리면 부팅 시 자동 적용된다(autoconnect):
+점검/설정은 `tools/lidar_net.sh`:
 
 ```bash
-ip -br link                                     # 포트 이름 확인 (장비마다 다르다)
-sudo tools/lidar_net_setup.sh apply <top_if> <front_if> <rear_if>
-     tools/lidar_net_setup.sh status            # 주소·경로·ping 한 번에 확인
+tools/lidar_net.sh status            # 포트 <-> host_ip <-> 라이다 표, 링크/ping, JSON 대조, SDK 패치 여부
+sudo tools/lidar_net.sh install      # 포트마다 고정 IP (NetworkManager, 부팅 시 자동 적용)
+sudo tools/lidar_net.sh install top=enxAAAA front=enP8p1s0 rear=enxBBBB   # 포트 이름이 다른 장비
 ```
 
-`status` 의 "인터페이스" 칸에 서로 다른 이름 세 개가 나와야 한다. 같은 이름이 겹치면 아직
-별칭(랜허브) 구성이고, `-` 면 그 host_ip 가 이 PC 에 없다는 뜻이다.
+`install` 은 포트마다 NetworkManager 연결을 `ipv4.method manual`, 해당 host_ip/24,
+`ipv4.never-default yes` (유선이 기본 게이트웨이를 가져가 Wi-Fi 인터넷을 끊는 것을 막는다) 로
+바꾼다. 손으로 하려면 포트마다:
 
-어느 포트에 어느 라이다가 꽂혔는지 모르면 한 대씩 꽂아가며 `status` 로 확인한다. 순서를
-잘못 넣으면 host_ip 와 라이다가 다른 서브넷에 놓여 ping 조차 안 간다 - 인자만 바꿔 다시
-`apply` 하면 된다.
+```bash
+nmcli -t -f NAME,DEVICE con show                      # 포트에 묶인 연결 이름 확인
+sudo nmcli con mod "Wired connection 2" ipv4.method manual ipv4.addresses 192.168.2.50/24 \
+  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+sudo nmcli con up "Wired connection 2"
+```
 
-스크립트가 각 연결에 `ipv4.never-default yes` 를 넣는다. 유선 포트가 기본 게이트웨이를
-가져가 Wi-Fi 인터넷을 끊는 것을 막는다 (포트가 3개라 이게 더 중요해졌다).
-
-드라이버가 `bind failed` -> `Init lds lidar fail!` 로 죽으면 십중팔구 이 표가 안 맞는 것이다.
-SDK 는 `host_ip` 를 그대로 bind 하므로, 그 주소가 이 PC 에 없으면 라이다 3대가 통째로 안 붙는다
-(ping 은 되는데 안 붙는 게 특징). 세 대 중 일부만 안 붙으면 `status` 의 `rp_filter` 를 본다.
-포트마다 서브넷이 하나씩이라 strict(1) 로도 정상이지만, 케이블을 잘못 꽂아 한 포트에 두
-서브넷이 섞이면 커널이 조용히 버린다.
+드라이버가 `bind failed` -> `Init lds lidar fail!` 로 죽으면 십중팔구 host_ip 가 이 PC 에 없는 것이다
+(ping 은 되는데 안 붙는 게 특징). `status` 에서 host_ip 는 있는데 ping 이 NO 면 케이블이 다른 포트에
+꽂힌 것이다.
 
 **SDK multi-NIC 패치가 필수다.** 순정 Livox-SDK2 는 detection 소켓을 첫 번째 라이다의
-host_ip 하나에만 열어서, 서브넷이 3개면 라이다 1대만 붙는다. `third_party/Livox-SDK2` 에는
-rbio 의 `patches/livox-sdk2-multi-nic-detection.patch` 가 적용돼 있다 (host_ip 마다 detection
+host_ip 하나에만 열어서, 포트(서브넷)가 3개면 라이다 1대만 붙는다. `third_party/Livox-SDK2` 에는
+rbio 와 동일한 `patches/livox-sdk2-multi-nic-detection.patch` 가 적용돼 있다 (host_ip 마다 detection
 소켓을 연다). SDK 를 새로 받아오면 `git apply patches/livox-sdk2-multi-nic-detection.patch` 후 빌드.
 
 ## rbio TransferRobot 스크립트로 실차 기동
@@ -390,6 +391,73 @@ vx = (v_f cosδf + v_r cosδr)/2,  vy = (v_f sinδf + v_r sinδr)/2,  wz = (v_f 
 rbio 앱 호환 `motor_node/set_docking_mode`, `docking/cmd_vel`. 파라미터는
 `src/motor_node/launch/motor.launch.py` (`startup_mode` 는 app 모드에서 1,
 JOY 관련은 `joy_steer_rate_deg_s` / `joy_max_linear_vel` / `joy_stick_deadzone`).
+
+## lift_node (리프트)
+
+rbio TransferRobot-Hanyang 앱의 `MotorControlManager` 리프트 부분을 ROS2 노드로 옮긴 것.
+리프트 제어보드와 **RS232 직결** (`/dev/ttyTHS1`, 115200 8N1 — 앱 `run_transfer_robot.sh` 기본값).
+프레임은 `[0x3E][프로토콜][길이][페이로드][CRC-8 poly 0x07]`, 리프트는 페이로드 1바이트.
+
+| 토픽 (Int32) | 프로토콜 | 0 | 1 | 2 |
+|---|---|---|---|---|
+| `lift/vertical` | 0x10 | 정지 | 상승 UP | 하강 DOWN |
+| `lift/horizontal` | 0x11 | 정지 | 전진 EXTEND | 후진 RETRACT |
+
+* 보드는 **마지막 지령을 래치**한다 (앱은 버튼 누름에 1/2, 뗌에 0 을 한 번씩 보냈다). 그래서
+  노드는 `cmd_timeout_s`(0.5 s) 안에 같은 지령이 다시 안 오면 정지를 보낸다. 움직이려면
+  `ros2 topic pub -r 10` 처럼 **계속 발행**해야 하고, 발행이 끊기면 선다. 같은 값이 반복되면
+  보드에는 다시 안 보내고 타임아웃만 연장한다. `cmd_timeout_s: 0.0` 이면 앱처럼 래치.
+* 정지 프레임은 75/180 ms 뒤 두 번 더 보낸다 (앱과 동일). 포트 열림·재연결·종료·
+  `lift_node/stop` 은 리프트 2축 + 호이스트 4개(0x20) 를 한꺼번에 정지한다 (앱 `stopAll` 묶음).
+* 연결 직후 0x40(로봇암 오류 조회) 을 보내 왕복 응답으로 링크를 점검한다 (앱 startup probe).
+  응답이 없으면 `NO_RESPONSE` 로 두되 지령은 막지 않는다 (진단 WARN).
+* 포트 오류는 2 s 간격으로 다시 연다. 사용자가 `dialout` 그룹이어야 한다:
+  `sudo usermod -aG dialout $USER` 후 재로그인. Jetson `nvgetty` 가 ttyTHS1 을 잡고 있으면
+  `sudo systemctl disable --now nvgetty`.
+
+```
+ros2 launch lift_node lift.launch.py                                 # 단독 (bringup 은 lift:=true 기본)
+ros2 topic echo /lift_node/status --once                             # READY|probe … / NO_RESPONSE|…
+ros2 run lift_node lift_action.py up                                 # 액션: 전 구간 상승 후 정지
+ros2 run lift_node lift_action.py down -d 2.5 --feedback             # 2.5 초 하강, 진행 상황 출력
+ros2 run lift_node lift_teleop_key.py                                # 키보드: 누르는 동안 구동, 떼면 정지
+ros2 topic pub -r 10 /lift/vertical std_msgs/msg/Int32 "{data: 1}"   # 상승. Ctrl-C 하면 0.5 s 뒤 정지
+ros2 service call /lift_node/stop std_srvs/srv/Trigger
+ros2 run lift_node lift_set.py probe                                 # ROS 없이 보드 직접 점검 (노드는 내리고)
+ros2 run lift_node lift_set.py up --hold 1.0                         # 1 초 상승 후 정지
+```
+
+**액션** `lift_node/move` (`lift_node/action/LiftMove`): 한 축을 정해진 시간만큼 구동하고
+끝나면 정지까지 보낸다. goal 은 `axis`(0 수직/1 수평), `direction`(1 상승·전진/2 하강·후진),
+`duration`(0 이면 노드 파라미터의 방향별 전 구간 시간). 피드백은 `elapsed`/`remaining`,
+결과는 `success` 와 `DONE|…`/`CANCELED|…`/`ABORTED|…` 메시지다.
+
+* 보드가 **위치·리밋을 알려주지 않으므로** "동작이 끝났다" 의 기준은 **구동 시간**이다.
+  보드가 되돌리는 프레임(RX)은 받은 지령의 에코일 뿐 완료 신호가 아니다. 기본값은 벤치에서
+  잰 전 구간 시간이다 — 상승은 지령부터 최대점에서 멈출 때까지 **약 4.2 s**
+  (`vertical_up_duration_s`). `vertical_down_duration_s` / `horizontal_extend_duration_s` /
+  `horizontal_retract_duration_s` 도 같은 식이고, 상한은 `max_move_duration_s`(30 s).
+  실제 스트로크를 다시 재면 이 파라미터만 고치면 된다.
+* goal 이 사는 동안 서버가 20 ms 마다 지령을 갱신해 `cmd_timeout_s` 로 서지 않게 한다.
+  시간이 다 되면 정지 프레임(+75/180 ms 재전송) 을 보내고 succeed 한다.
+* 동시에 사는 goal 은 하나다. **취소**, **새 goal 의 선점**, 그 축에 들어온 **수동 토픽 지령**,
+  `lift_node/stop`·`reconnect`, **링크 끊김** 어느 쪽으로 끝나든 goal 은 결과를 돌려받고
+  축은 선다 (수동 지령에 밀린 경우는 그 지령이 축을 덮어쓴다).
+* CLI `lift_action.py up|down|extend|retract [-d 초] [--feedback] [--no-wait]` — Ctrl-C 하면
+  goal 을 취소하고 서버가 축을 세운 뒤 돌려주는 결과까지 받는다.
+  종료 코드 0 성공 / 1 실패(거절·중단·취소) / 2 서버 없음.
+
+**키보드 텔레옵** `lift_teleop_key.py`: ↑/w 상승, ↓/s 하강, →/d 전진, ←/a 후진, space 전부 정지,
+q 종료. 터미널은 키 뗌 이벤트가 없어서 **OS 자동반복 문자가 끊기는 것**을 뗀 것으로 본다 —
+첫 누름 뒤 반복이 시작될 때까지는 `--tap-timeout`(0.6 s), 반복 중에는 `--release-timeout`(0.15 s)
+안에 문자가 없으면 정지. 짧게 톡 치면 최대 0.6 s 뒤에 서고, 누르고 있다 떼면 ~0.15 s 뒤에 선다.
+시작할 때 움찔거리면(OS 반복 지연 > 0.6 s) `--tap-timeout` 을 늘린다. SSH 로 쓸 때 반복은
+**접속한 쪽 PC** 설정을 따른다 (X11: `xset r rate 200 40`).
+
+토픽/서비스/액션: `lift/vertical`, `lift/horizontal`,
+`lift_node/{command_ack, status(latched "STATE|detail"), diagnostics, rx(수신 hex)}`,
+`lift_node/{stop, reconnect, probe}`(Trigger), `lift_node/move`(LiftMove 액션). 파라미터는 `src/lift_node/launch/lift.launch.py`.
+호이스트(0x20)·로봇암(0x30~0x51) 구동은 아직 안 옮겼다 — 정지 프레임만 낸다.
 
 ## Nav2 구성
 
