@@ -107,6 +107,14 @@ def generate_launch_description():
         package='fast_lio_localization',
         executable='transform_fusion.py',
         name='transform_fusion',
+        # 두 노드의 NumPy 연산은 4x4 행렬뿐이다. OpenBLAS 기본 스레드 풀을
+        # 그대로 두면 Jetson에서 노드당 십여 개 스레드가 spin하며 LiDAR
+        # callback을 밀어낸다. FAST-LIO/ICP 노드의 병렬 설정은 건드리지 않는다.
+        additional_env={
+            'OPENBLAS_NUM_THREADS': '1',
+            'MKL_NUM_THREADS': '1',
+            'NUMEXPR_NUM_THREADS': '1',
+        },
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
             {'use_sim_time': use_sim_time},
@@ -132,6 +140,11 @@ def generate_launch_description():
         package='fast_lio_localization',
         executable='tf_2d.py',
         name='tf_2d_bridge',
+        additional_env={
+            'OPENBLAS_NUM_THREADS': '1',
+            'MKL_NUM_THREADS': '1',
+            'NUMEXPR_NUM_THREADS': '1',
+        },
         parameters=[
             PathJoinSubstitution([config_path, config_file]),
             {'use_sim_time': use_sim_time}

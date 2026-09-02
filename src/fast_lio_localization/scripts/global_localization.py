@@ -46,6 +46,16 @@ class GlobalLocalizationNode(Node):
         # 이보다 크게 뛰면 반복 구조에 한 칸 밀려 정합된 해로 본다.
         self.declare_parameter('max_correction_xyz', 0.5)   # m
         self.declare_parameter('max_correction_deg', 5.0)   # deg
+        # 엄격한 1회 보정 제한은 유지하되, FAST-LIO 드리프트가 제한을 이미
+        # 넘어선 경우에는 같은 고품질 후보가 여러 번 반복될 때만 복구한다.
+        self.declare_parameter('confirmed_recovery_enabled', False)
+        self.declare_parameter('confirmed_recovery_count', 3)
+        self.declare_parameter('confirmed_recovery_max_xyz', 1.5)
+        self.declare_parameter('confirmed_recovery_max_deg', 5.0)
+        self.declare_parameter('confirmed_recovery_min_tight_fitness', 0.90)
+        self.declare_parameter('confirmed_recovery_max_fitness_drop', 0.01)
+        self.declare_parameter('confirmed_recovery_xyz_tolerance', 0.15)
+        self.declare_parameter('confirmed_recovery_deg_tolerance', 3.0)
 
         self.map_voxel_size    = self.get_parameter('map_voxel_size').value
         self.scan_voxel_size   = self.get_parameter('scan_voxel_size').value
@@ -60,6 +70,22 @@ class GlobalLocalizationNode(Node):
         self.max_tilt_deg      = self.get_parameter('max_tilt_deg').value
         self.max_correction_xyz = self.get_parameter('max_correction_xyz').value
         self.max_correction_deg = self.get_parameter('max_correction_deg').value
+        self.confirmed_recovery_enabled = self.get_parameter(
+            'confirmed_recovery_enabled').value
+        self.confirmed_recovery_count = self.get_parameter(
+            'confirmed_recovery_count').value
+        self.confirmed_recovery_max_xyz = self.get_parameter(
+            'confirmed_recovery_max_xyz').value
+        self.confirmed_recovery_max_deg = self.get_parameter(
+            'confirmed_recovery_max_deg').value
+        self.confirmed_recovery_min_tight_fitness = self.get_parameter(
+            'confirmed_recovery_min_tight_fitness').value
+        self.confirmed_recovery_max_fitness_drop = self.get_parameter(
+            'confirmed_recovery_max_fitness_drop').value
+        self.confirmed_recovery_xyz_tolerance = self.get_parameter(
+            'confirmed_recovery_xyz_tolerance').value
+        self.confirmed_recovery_deg_tolerance = self.get_parameter(
+            'confirmed_recovery_deg_tolerance').value
         xyz = self.get_parameter('ref_from_body_xyz').value
         rpy = self.get_parameter('ref_from_body_rpy').value
         self.T_body_ref = tf_transformations.euler_matrix(*rpy)
@@ -79,6 +105,8 @@ class GlobalLocalizationNode(Node):
         # /initialpose 가 ICP 실패로 임시 채택된 상태. 아직 수 m 틀려 있을 수
         # 있으니 다음 주기는 추적용이 아니라 초기화 사다리로 한 번 더 돌린다.
         self.needs_reinit  = False
+        self.pending_recovery = None
+        self.pending_recovery_count = 0
 
         # ─── Publishers ──────────────────────────────────────────
         self.pub_pc_in_map   = self.create_publisher(PointCloud2, '/cur_scan_in_map', 1)
@@ -261,6 +289,7 @@ class GlobalLocalizationNode(Node):
         roll, pitch, _ = tf_transformations.euler_from_matrix(T_map_ref)
         tilt = np.degrees(max(abs(roll), abs(pitch)))
         if tilt > self.max_tilt_deg:
+            self.reset_pending_recovery()
             self.get_logger().warn(
                 f'Global localization rejected: vehicle roll/pitch {tilt:.1f} deg '
                 f'(flipped or tilted solution).')
@@ -272,18 +301,63 @@ class GlobalLocalizationNode(Node):
 
             # (a) 보정량 제한. map->odom 은 드리프트 보정이라 한 주기에
             #     조금씩만 변해야 한다. 크게 뛰면 잘못 정합된 해다.
+            base_tight = self.evaluate(scan_copy, submap, pose_est, 0.4)
             d_xyz, d_deg = self.pose_delta(pose_est, T)
+            confirmed_recovery = False
             if d_xyz > self.max_correction_xyz or d_deg > self.max_correction_deg:
-                self.get_logger().warn(
-                    f'Global localization rejected: correction too large '
-                    f'({d_xyz:.2f} m, {d_deg:.1f} deg); keeping previous estimate.')
-                return False
+                recovery_in_range = (
+                    self.confirmed_recovery_enabled
+                    and d_xyz <= self.confirmed_recovery_max_xyz
+                    and d_deg <= self.confirmed_recovery_max_deg
+                    and tight_fitness >= self.confirmed_recovery_min_tight_fitness
+                    and tight_fitness + self.confirmed_recovery_max_fitness_drop
+                    >= base_tight)
+                if recovery_in_range:
+                    if self.pending_recovery is None:
+                        consistent = False
+                    else:
+                        candidate_xyz, candidate_deg = self.pose_delta(
+                            self.pending_recovery, T)
+                        consistent = (
+                            candidate_xyz <= self.confirmed_recovery_xyz_tolerance
+                            and candidate_deg <= self.confirmed_recovery_deg_tolerance)
+
+                    if consistent:
+                        self.pending_recovery_count += 1
+                    else:
+                        self.pending_recovery_count = 1
+                    self.pending_recovery = T.copy()
+
+                    if self.pending_recovery_count >= self.confirmed_recovery_count:
+                        confirmed_recovery = True
+                        self.get_logger().warn(
+                            f'Accepting confirmed localization recovery after '
+                            f'{self.pending_recovery_count} consistent candidates: '
+                            f'{d_xyz:.2f} m, {d_deg:.1f} deg, '
+                            f'tight fitness {tight_fitness:.3f}.')
+                        self.reset_pending_recovery()
+                    else:
+                        self.get_logger().warn(
+                            f'Large correction candidate pending confirmation '
+                            f'({self.pending_recovery_count}/'
+                            f'{self.confirmed_recovery_count}): '
+                            f'{d_xyz:.2f} m, {d_deg:.1f} deg, '
+                            f'tight fitness {tight_fitness:.3f}.')
+                        return False
+                else:
+                    self.reset_pending_recovery()
+                    self.get_logger().warn(
+                        f'Global localization rejected: correction too large '
+                        f'({d_xyz:.2f} m, {d_deg:.1f} deg); keeping previous estimate.')
+                    return False
+            else:
+                self.reset_pending_recovery()
 
             # (b) 지금 쓰고 있는 추정보다 나빠지면 버린다. 절대 문턱과 달리
             #     맵 커버리지(사람, 치워진 가구, 미측량 구역)에 영향받지 않는
             #     같은 스캔/서브맵 위의 비교라 따로 튜닝할 값이 없다.
-            base_tight = self.evaluate(scan_copy, submap, pose_est, 0.4)
-            if tight_fitness < base_tight:
+            if not confirmed_recovery and tight_fitness < base_tight:
+                self.reset_pending_recovery()
                 self.get_logger().warn(
                     f'Global localization rejected: 0.4m fitness got worse '
                     f'({base_tight:.3f} -> {tight_fitness:.3f}); keeping previous estimate.')
@@ -295,7 +369,12 @@ class GlobalLocalizationNode(Node):
             return True
 
         self.get_logger().warn('Global localization failed (fitness below threshold).')
+        self.reset_pending_recovery()
         return False
+
+    def reset_pending_recovery(self):
+        self.pending_recovery = None
+        self.pending_recovery_count = 0
 
     @staticmethod
     def pose_delta(T_a, T_b):

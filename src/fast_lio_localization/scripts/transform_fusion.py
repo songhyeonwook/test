@@ -20,7 +20,16 @@ from nav_msgs.msg import Odometry
 class TransformFusionNode(Node):
     def __init__(self):
         super().__init__('transform_fusion')
-        self.FREQ_PUB_LOCALIZATION = 50.0  # Hz
+        # FAST-LIO Odometry 자체가 약 10 Hz다. 같은 행렬 분해 결과를 50 Hz로
+        # 반복 계산하면 Jetson에서 CPU만 크게 사용하고 LiDAR merge 콜백을
+        # 밀어낸다. 3D localization은 새 Odometry 주기와 맞춰 내보낸다.
+        self.declare_parameter('publish_rate_hz', 10.0)
+        self.FREQ_PUB_LOCALIZATION = float(
+            self.get_parameter('publish_rate_hz').value)
+        if self.FREQ_PUB_LOCALIZATION <= 0.0:
+            self.get_logger().warning(
+                'publish_rate_hz must be positive; using 10.0 Hz')
+            self.FREQ_PUB_LOCALIZATION = 10.0
 
         # map->camera_init TF. 정식 트리(map->odom->base_link)는 tf_2d.py 가
         # 내므로 평소에는 끈다. RViz 에서 camera_init 프레임 클라우드
@@ -66,6 +75,14 @@ class TransformFusionNode(Node):
         return trans @ rot
 
     def timer_callback(self):
+        # 평소 Nav2는 tf_2d_bridge의 map->odom->base_link와 /localization을
+        # 사용한다. /localization_3d 구독자도 debug TF도 없으면 아래의 NumPy/
+        # tf_transformations 행렬 분해 결과는 아무도 소비하지 않는다. Jetson의
+        # LiDAR 병합 콜백을 밀지 않도록 실제 소비자가 있을 때만 계산한다.
+        if (not self.publish_debug_tf and
+                self.pub_localization.get_subscription_count() == 0):
+            return
+
         with self.lock:
             odom    = copy.deepcopy(self.cur_odom_to_baselink)
             map2odom = copy.deepcopy(self.cur_map_to_odom)

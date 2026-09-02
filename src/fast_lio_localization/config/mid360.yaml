@@ -12,9 +12,25 @@
         fov_far: 25.0
         max_correction_xyz: 0.5   # m
         max_correction_deg: 5.0   # deg
+        # 0.5m 제한은 그대로 유지한다. 단, 같은 고품질 보정(최대 1.5m)이
+        # 2초 간격으로 3번 연속 확인될 때만 stale map->odom 을 복구한다.
+        confirmed_recovery_enabled: true
+        confirmed_recovery_count: 3
+        confirmed_recovery_max_xyz: 1.5
+        confirmed_recovery_max_deg: 5.0
+        confirmed_recovery_min_tight_fitness: 0.90
+        confirmed_recovery_max_fitness_drop: 0.01
+        confirmed_recovery_xyz_tolerance: 0.15
+        confirmed_recovery_deg_tolerance: 3.0
         continuous_global_localization: true
         cube_side_length: 1000.0
         runtime_pos_log_enable: false
+        # FAST-LIO 입력은 약 10Hz다. transform_fusion이 동일 자세를 50Hz로
+        # 재계산하면 Jetson CPU를 과점유해 3-LiDAR merge가 3~5Hz로 밀린다.
+        publish_rate_hz: 10.0
+        # Nav2 transform_tolerance(0.1s) 안에 항상 최신 TF가 있도록 20Hz로
+        # 재발행한다. 50Hz는 의미 없이 Python/TF 부하만 늘린다.
+        keepalive_rate_hz: 20.0
         common:
             lid_topic:  "/livox_merge/merged_pointcloud"   # 라이다 3대 병합 (base_link 기준)
             imu_topic:  "/livox/imu_192_168_1_135"   # 상단(livox_top) MID-360 내장 IMU
@@ -44,13 +60,14 @@
                                        # 100 은 ikd-tree 큐브만 헛되이 키운다.
            
             extrinsic_est_en:  false     # true: enable the online estimation of IMU-LiDAR extrinsic
-            extrinsic_T: [ 0.0, 0.40401, -0.23088 ]   # 2026-08-28 top z 실측 반영
-            extrinsic_R: [ -1., 0., 0.,
-                            0., 0., -1.,
-                            0., -1., 0.]
+            # 2026-09-02 바닥 평면 실측 top 장착값에서 유도 (tools/check_frames.py 로 검증)
+            extrinsic_T: [ 0.01318, 1.31736, -0.20576 ]
+            extrinsic_R: [ -0.99995,  0.     , -0.00987,
+                            0.00986,  0.01877, -0.99978,
+                            0.00019, -0.99982, -0.01877]
 
-        ref_from_body_xyz: [ 0.0, 0.40401, -0.23088 ]   # extrinsic_T 와 같아야 한다
-        ref_from_body_rpy: [ -1.5707963267948966, 0.0, -3.141592653589793 ]  # -pi/2 0 -pi
+        ref_from_body_xyz: [ 0.01318, 1.31736, -0.20576 ]   # extrinsic_T 와 같아야 한다
+        ref_from_body_rpy: [ -1.589566, -0.000185, 3.131728 ]  # top 이 -90도에서 1.08도 더 기움
 
         publish:
             tf_en: false                 # camera_init->body TF. 정식 트리는 tf_2d 가 내는
