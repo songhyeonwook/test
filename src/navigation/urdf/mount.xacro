@@ -1,10 +1,4 @@
 <?xml version="1.0"?>
-<!--
-  장착값 한 곳. vehicle.urdf.xacro 가 읽는다.
-  병합 노드는 이 값을 TF 로 그대로 받아 쓴다(사본 없음). 값을 고치면
-  tools/check_frames.py 로 fast_lio 설정과의 정합을,
-  tools/check_lidar_overlap.py 로 실물과의 정합을 확인할 것.
--->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!-- 차체 치수 (nav2 footprint 와 같은 실측값).
@@ -18,16 +12,24 @@
        front/rear 의 중점이고, z 0.32 는 지면 위 라이다 평면 높이다. -->
   <xacro:property name="livox_frame_xyz" value="0.0485 0.005 0.32"/>
 
-  <!-- 라이다 장착 (livox_frame 기준). front/rear 는 정의상 정확히 원점대칭이다. -->
-  <xacro:property name="front_xyz" value="0.6485 0.345 0"/>
-  <xacro:property name="front_rpy" value="0 0 ${pi/2}"/>
+  <!-- Front라이다 장착 위치 (livox_frame 기준).-->
+  <xacro:property name="front_xyz" value="0.6485 0.345 0.0825"/>
+  <xacro:property name="front_rpy" value="0.005567 -0.010252 ${pi/2}"/>
 
+  <!-- Rear라이다 장착 위치 (livox_frame 기준).-->
   <xacro:property name="rear_xyz"  value="-0.6485 -0.345 0"/>
   <xacro:property name="rear_rpy"  value="0 0 ${-pi/2}"/>
 
-  <!-- MID-360 장착 (livox_frame 기준). front/rear 는 정의상 정확히 원점대칭이다. -->
-  <xacro:property name="top_xyz"   value="-0.0375 -0.28 0.1073"/>
-  <xacro:property name="top_rpy"   value="${-pi/2} 0 ${pi}"/>
+  <!-- Top 라이다 장착 (livox_frame z 0.32 기준).
+       주행모드 지면 위 1.3359 m (rel 1.0159), 도킹모드 1.9346 m (rel 1.6146).
+       URDF 조인트에는 주행모드(top_xyz/top_rpy)가 들어가고, /docking 토픽이
+       true 면 top_tf_switcher.py 가 도킹모드(top_dock_*)로 TF 를 바꿔 낸다.
+   -->
+  <xacro:property name="top_xyz"      value="-0.0375 -0.28 1.0159"/>
+  <xacro:property name="top_rpy"      value="-1.589567 0.009866 ${pi}"/>
+  <xacro:property name="top_dock_xyz" value="-0.0375 -0.28 1.6146"/>
+  <xacro:property name="top_dock_rpy" value="-1.586673 0.009306 ${pi}"/>
+
 
   <!-- MID-360 몸통 원점 -> 내부 IMU (Livox 공장값) -->
   <xacro:property name="imu_xyz"   value="0.011 0.02329 -0.04412"/>

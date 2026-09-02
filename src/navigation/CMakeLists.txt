@@ -13,4 +13,9 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/top_tf_switcher.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

@@ -26,4 +26,12 @@ def generate_launch_description():
                              os.path.join(urdf_dir, 'vehicle.urdf.xacro')]),
                     value_type=str),
             }]),
+        # /docking(Bool) 에 따라 livox_frame->livox_top TF 를 주행/도킹모드로
+        # 전환한다. 값은 mount.xacro 의 top_xyz/top_rpy, top_dock_* 를 읽는다.
+        Node(
+            package='navigation',
+            executable='top_tf_switcher.py',
+            name='top_tf_switcher',
+            output='screen',
+            parameters=[{'use_sim_time': use_sim_time}]),
     ])
