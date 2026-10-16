@@ -17,7 +17,7 @@ hw/
 │   ├── navigation/                 ★ URDF/TF · Nav2 파라미터 · behavior tree · 맵
 │   └── bringup/                    ★ 전체 launch, bag 재생 테스트
 ├── third_party/Livox-SDK2/         colcon 대상 아님. multi-NIC 패치 적용됨, cmake --install 필요
-├── tools/                          lidar_net.sh(라이다 포트/IP), can_setup.sh, check_frames.py, check_lidar_z.py, check_lidar_overlap.py, ply_to_pcd.py
+├── tools/                          lidar_net.sh(라이다 포트/IP), can_setup.sh, check_frames.py, check_lidar_z.py, check_lidar_overlap.py, record_ktl_trial.sh
 └── bag/                            rosbag 기록 위치 (git 제외)
 ```
 
@@ -30,6 +30,7 @@ src/navigation/
 ├── rviz/               frames_check.rviz
 ├── launch/             description.launch.py (TF), navigation_launch.py (Nav2)
 ├── params/             nav2_params.yaml
+├── scripts/            Goal 오차 기록 · 진행방향 raw 정지 · 360° 동적장애물 추적
 ├── behavior_trees/     차량형 전용 BT (spin/backup 없음, 5초 주기 재계획)
 └── map/                test.pcd (3D, 측위용) + test.pgm/test.yaml (2D, 코스트맵용)
 ```
@@ -55,7 +56,13 @@ MID-360 top ───── /livox/imu_192_168_1_135 ─────────
                                             │
                                   map ─ odom ─ base_link   (TF)
                                             │
-                                          Nav2 ─ /cmd_vel ─ motor_node
+                                          Nav2 ─ velocity_smoother
+                                                   │
+                                      진행방향 raw collision gate
+                                                   │
+                                      360° 동적 Collision Monitor
+                                                   │
+                                               /cmd_vel ─ motor_node
 ```
 
 TF 트리 (단일 체인):
@@ -113,6 +120,12 @@ URDF/TF 의존성 (`description.launch.py` 가 `xacro` 명령을 실행한다. �
 
 ```bash
 sudo apt install ros-humble-xacro ros-humble-robot-state-publisher ros-humble-joint-state-publisher
+```
+
+Nav2 장애물 안전 계층과 PointCloud 처리 의존성:
+
+```bash
+sudo apt install ros-humble-nav2-collision-monitor python3-numpy
 ```
 
 측위용 파이썬 의존성 (`global_localization.py`, `transform_fusion.py` 가 쓴다):
@@ -269,6 +282,15 @@ ros2 launch bringup bringup.launch.py
 # 모터노드가 READY 가 되면 주행 모드를 골라준다 (기본은 0=정렬, 구동 차단)
 ros2 topic echo /motor_node/initialization_status --once   # READY|...
 ros2 topic pub -1 /mode std_msgs/Int32 "{data: 1}"         # 1=애커만(4WS 역위상)
+```
+
+`bringup.launch.py` 는 기본으로 진행방향 raw 정지, 360° 동적장애물 정지·재개,
+Goal 오차 기록을 함께 실행한다. 개별 진단 때만 launch 인자로 끈다:
+
+```bash
+ros2 launch bringup bringup.launch.py collision_monitor:=false
+ros2 launch bringup bringup.launch.py dynamic_tracker:=false
+ros2 launch bringup bringup.launch.py goal_recorder:=false
 ```
 
 CAN 이 없는 개발 PC 에서는 `motor:=false`. 조이스틱 수동주행이 필요하면
@@ -463,19 +485,52 @@ q 종료. 터미널은 키 뗌 이벤트가 없어서 **OS 자동반복 문자�
 
 | 항목 | 값 | 이유 |
 |---|---|---|
-| 플래너 | `SmacPlannerHybrid`, DUBIN, `minimum_turning_radius` 1.30 | 조향식 차량. 2D 플래너는 회전반경 없는 경로를 내서 못 쓴다 |
-| 컨트롤러 | `MPPIController`, `motion_model: Ackermann`, `min_turning_r` 1.30 | 롤아웃 비용으로 동적 장애물을 직접 회피. RPP 는 회피를 못 한다 |
+| 플래너 | `SmacPlannerHybrid`, REEDS_SHEPP, `minimum_turning_radius` 0.80 | 조향식 차량. 마지막 정렬에서 필요할 때만 짧은 후진-전진 cusp를 허용한다 |
+| 컨트롤러 | `MPPIController`, `motion_model: Ackermann`, `min_turning_r` 0.80 | 롤아웃 비용으로 정적 장애물을 회피. RPP 는 회피를 못 한다 |
 | 장애물 입력 | `/livox_merge/merged_pointcloud_sliced` -> local/global `obstacle_layer` | 지면 위 0.15~2.3 m 슬라이스 + 차체 XY 크롭(`slice_crop_half_*`) |
 | local costmap | 12x12 m, 10 Hz | 기본 5x5 m 는 범퍼 앞 1.7 m 라 동적 회피가 성립 안 함. `width`/`height` 는 **정수**로 |
-| MPPI 지평선 | `time_steps` 130 x `model_dt` 0.1 = 13 s (2.6 m) | 차체 1.62 m + 90도 선회호 2.04 m 를 담아야 회피 궤적이 나온다 |
-| 속도 한계 | vx 0.20, wz 0.30 (MPPI, velocity_smoother, behavior_server) | motor_node 의 `max_linear_vel` / `max_angular_vel` 와 동일해야 한다 |
+| MPPI 지평선 | `time_steps` 100 x `model_dt` 0.1 = 10 s (2.0 m), `batch_size` 800 | 차체 1.62 m 보다 긴 회피 구간을 유지하면서 Jetson 계산량을 제한한다 |
+| MPPI 속도 한계 | vx 0.20, wz 0.25 | 0.20 m/s / 최소회전반경 0.80 m의 각속도와 맞춘다 |
+| Goal 성공 판정 | `PositionGoalChecker`, 위치 0.04 m | KTL 70 mm 기준에 정지 오버슈트 여유를 두고 yaw 반복 정렬은 성공 조건에서 제외한다 |
 
 `cmd_vel` 의 (v, ω) 는 차량 중심(base_link) 속도이고 조향각 변환은 motor_node
-가 한다. 실제 최소회전반경은 (축간 1.29/2)/tan55° ≈ 0.45 m 라 1.30 은 보수값이다.
+가 한다. 4WS 역위상, 축간거리 1.29 m, 최대조향 45°의 이론 최소회전반경은
+1.29/(2 tan45°) ≈ 0.645 m 이고, 끝단 포화 여유를 둔 0.80 m를 사용한다.
 
 **시작 위치 주의:** Smac 은 시작 footprint(0.81x0.48, local/global 동일) 가 치명 셀과 겹치면
 `Starting point in lethal space` 로 계획을 거부한다. 벽에 붙여 주차한 상태에서
 goal 을 주면 이 때문에 안 움직이니, 벽에서 20~30 cm 이상 떨어진 곳에서 시작한다.
+
+### 장애물 안전 계층
+
+정적 장애물은 local/global `obstacle_layer` 에 반영하고 MPPI가 회피한다.
+분류 결과와 무관하게 전진 중에는 전방, 후진 중에는 후방의 병합 raw point를
+근거리 안전영역에서 검사하고, 영역이 막히면 속도 명령을 즉시 0으로 바꾼다.
+
+움직임이 확인된 객체는 세 라이다 중 어느 쪽에서 검출됐든 차체 주변 360° 영역에서
+정지 대상으로 유지한다. 객체가 다시 멈추거나 군집 ID가 잠시 바뀌어도 바로 해제하지
+않고, 마지막 위치 주변이 연속으로 비어 안전영역을 벗어난 것이 확인되면 주행을 재개한다.
+속도 명령은 `velocity_smoother -> directional collision gate ->
+dynamic Collision Monitor -> /cmd_vel` 순서로 통과한다.
+
+### Goal 도달 오차 기록
+
+`bringup.launch.py` 는 NavigateToPose 성공 직후 첫 유효 `/localization`을 받아
+기준 Goal과의 x/y 거리 및 yaw 차이를 자동 기록한다. 이 값은 반복 주행의 ROS 내부
+성능 비교용이며 KTL의 외부 레이저 실측을 대신하지 않는다.
+
+현재 반복시험 기준 Goal:
+
+```yaml
+frame_id: map
+position: {x: -7.355742617115387, y: 2.1501534559125135}
+yaw_deg: 150.20799034716626
+```
+
+결과는 `~/nav_goal_results/latest_result.txt`와
+`~/nav_goal_results/goal_results.csv`에 저장된다. 기준 위치를 다시 정하면
+`src/bringup/launch/bringup.launch.py`의 `reference_goal_x/y/yaw_deg`도
+같이 바꾼다.
 
 ## 맵 만들기
 
@@ -546,10 +601,10 @@ ros2 topic hz /livox_merge/merged_pointcloud_sliced      # 10 Hz
 
 - `mount.xacro` 의 `top_xyz` z 값(livox_frame 기준 1.0265)이 실측 전 추정치다.
   오차 +-0.025.
-- 최소회전반경 1.30 m 는 보수값. 현장에서 안정 확인 후 0.7~0.8 로 낮출 수 있다
-  (플래너 `minimum_turning_radius` 와 MPPI `min_turning_r` 를 같이).
-- MPPI `batch_size` 1200 은 데스크톱 기준. Jetson 에서 `Control loop missed`
-  경고가 나면 줄인다.
+- 최소회전반경은 실차 선회와 끝단 포화 여유를 반영해 0.80 m를 사용한다.
+  바꾸면 플래너 `minimum_turning_radius` 와 MPPI `min_turning_r` 를 같이 맞춘다.
+- MPPI `batch_size` 는 Jetson 계산량을 고려해 800을 사용한다. 그래도
+  `Control loop missed` 경고가 나면 추가로 줄인다.
 - front/rear 라이다 프레임 시작 시각이 동기화되지 않아 한쪽 점들의 시각이 최대
   100 ms 어긋날 수 있다. 저속이라 영향은 작다.
 - 벽에 붙은 시작 위치에서 계획 거부 (위 Nav2 구성 참조). 2D 맵의 벽 두께/잡음을

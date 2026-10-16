@@ -124,9 +124,13 @@ controller_server:
 
     # Progress checker parameters
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.15
-      movement_time_allowance: 40.0
+      # 최종 위치 부근에서는 Ackermann 차량이 작은 전후진과 회전으로 yaw를
+      # 맞춘다. 위치 변화만 보는 SimpleProgressChecker는 이 동작을 40초 뒤
+      # "Failed to make progress"로 잘못 abort하므로 회전 진전도 함께 본다.
+      plugin: "nav2_controller::PoseProgressChecker"
+      required_movement_radius: 0.05
+      required_movement_angle: 0.05
+      movement_time_allowance: 45.0
     # Goal checker parameters
     #precise_goal_checker:
     #  plugin: "nav2_controller::SimpleGoalChecker"
@@ -134,13 +138,14 @@ controller_server:
     #  yaw_goal_tolerance: 0.25
     #  stateful: True
     general_goal_checker:
-      stateful: True
-      plugin: "nav2_controller::SimpleGoalChecker"
-      # 침대 옆 정렬에서는 위치만 들어오고 차체가 덜 꺾인 상태를 성공으로
-      # 처리하면 안 된다. 0.60m / 0.90rad(약 52도)였던 값을 실제 정렬용으로
-      # 좁히되, 실차 localization 오차를 감안해 과도하게 빡빡하게 두지는 않는다.
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.08  # 약 4.6도: 침대와 수평 정렬될 때까지 성공 처리 금지
+      # KTL 판정은 목표점에 대한 위치오차 70mm가 기준이다. 목표 yaw는 전역경로와
+      # MPPI 접근 자세 생성에는 계속 사용하되, 성공 판정에서는 제외한다.
+      # 중심 위치가 40mm 안에 들어오면 action을 끝내고 0속도를 출력한다.
+      # KTL 위치 기준 70mm에 정지 관성·슬립·localization 지연 여유를 두되,
+      # yaw는 성공 판정에서 제외해 종점 전후진/좌우조향 반복을 방지한다.
+      plugin: "nav2_controller::PositionGoalChecker"
+      stateful: False
+      xy_goal_tolerance: 0.04
     # MPPI + Ackermann 모델: 후륜 역조향(조향식) 차량에 맞는 최소회전반경
     # 제약을 지키면서, local costmap 의 동적 장애물을 롤아웃 비용으로 직접
     # 회피한다. RPP 는 경로 추종만 하고 회피는 못 해서 교체했다.
@@ -162,7 +167,7 @@ controller_server:
       # 후진 기동도 샘플링한다. 평상시에는 PreferForwardCritic이 전진을 우선한다.
       vx_std: 0.10
       vy_std: 0.0
-      wz_std: 0.10           # 저속에서 좌우 최대조향으로 튀는 노이즈를 억제
+      wz_std: 0.05           # 직선 출발 시 좌우 조향 샘플 진동 억제
       vx_max: 0.20
       vx_min: -0.10          # 최종 정렬/막힌 커브 복구용 저속 후진 허용
       vy_max: 0.0
@@ -170,7 +175,7 @@ controller_server:
       ax_max: 0.3
       ax_min: -0.3
       ay_max: 0.0
-      az_max: 0.5
+      az_max: 0.20
       motion_model: "Ackermann"
       AckermannConstraints:
         # 4WS 역위상, 축간거리 1.29m, 최대조향 45deg의 이론값은
@@ -195,23 +200,30 @@ controller_server:
       GoalCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        # KTL 위치오차가 우선이다. 최근 시험에서 목표 7~13cm 구간을 반복하며
+        # 4cm 성공영역에 진입하지 못했으므로 XY 수렴 비용을 더 우선한다.
+        cost_weight: 12.0
         # 최소회전반경 0.8m인 차가 마지막 순간이 아니라 선회 공간이 있을 때부터
         # goal 위치로 수렴하도록 한다.
         threshold_to_consider: 1.8
       GoalAngleCritic:
         enabled: true
         cost_power: 1
-        # 기존 0.5m 안쪽부터는 4WS Ackermann이 목표 yaw를 만들기에 너무 늦었다.
-        # 1.8m 전부터 목표 방향을 강하게 반영해 침대 앞 최종 선회를 미리 시작한다.
-        cost_weight: 10.0
-        threshold_to_consider: 1.8
+        # goal checker의 yaw 허용값(0.6rad)보다 훨씬 정확한 0rad를 강제로
+        # 추종하던 종전 10.0은 목표 앞 좌우조향/전후진 반복을 유발했다.
+        # PositionGoalChecker는 yaw를 성공 조건으로 사용하지 않는다. 최근 시험의
+        # yaw 오차 16.1도는 KTL 기준 0.5rad 안이었으므로, 위치를 다시 벗어나면서
+        # 정확한 0rad를 추종하지 않도록 약한 자세 보조 비용만 남긴다.
+        cost_weight: 1.0
+        threshold_to_consider: 1.2
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
-        # 일반 구간은 전진 우선, 마지막 1.8m에서는 Reeds-Shepp의 짧은 후진을 허용.
-        threshold_to_consider: 1.8
+        cost_weight: 10.0
+        # 최근 bag에서 마지막 30초 동안 전진/후진 해가 26회 바뀌었다. 후진
+        # 기능 자체는 복구용으로 유지하되, 4cm 성공영역에 들어갈 때까지 전진
+        # 해를 우선하여 목표 직전 왕복 진동을 억제한다.
+        threshold_to_consider: 0.04
       # 장애물 비용. 직사각형 차체(1.62x0.95)라 원 근사 대신 footprint 검사.
       CostCritic:
         enabled: true
@@ -295,8 +307,8 @@ local_costmap:
         # 실제 footprint의 inscribed radius가 약 0.48m다. 이보다 작은 radius는
         # 벽 접근 비용 경사를 없애 MPPI가 커브 안쪽을 자르게 만든다. 충돌 영역
         # 밖에 약 12cm의 가파른 경사만 두어 벽 접근은 막되 통로 전체는 잠그지 않는다.
-        cost_scaling_factor: 10.0
-        inflation_radius: 0.60
+        cost_scaling_factor: 8.0
+        inflation_radius: 0.25
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -343,11 +355,10 @@ global_costmap:
           expected_update_rate: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        # 전역 플래너가 goal 쪽 최단거리로 벽에 붙지 않고 통로 중앙을 선택하도록
-        # local보다 넓고 완만한 거리 비용장을 만든다. 이 영역은 비치명적 비용이며
-        # 실제 충돌 판정은 기존 직사각형 footprint가 그대로 담당한다.
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.75
+        # 출장 현장에서 확인한 얇은 costmap 형상을 유지한다. 중앙 경로 선호는
+        # 아래 Smac Hybrid의 cost_penalty로 별도 조정한다.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.9
       always_send_full_costmap: True
 
 map_server:
@@ -400,9 +411,9 @@ planner_server:
       # 좌/우 선회 방향을 짧게 반복하는 지그재그 해를 약하게 억제한다.
       change_penalty: 0.1
       non_straight_penalty: 1.05
-      # goal까지의 단순 최단거리보다 inflation 비용이 낮은 통로 중앙을 우선한다.
-      # 너무 크게 올리면 우회가 과해지므로 기본 2.0에서 보수적으로 3.5만 적용한다.
-      cost_penalty: 3.5
+      # costmap 형상은 유지하면서 벽 가까운 셀의 비용을 탐색에서 더 무겁게
+      # 평가하여 단순 최단거리보다 통로 중앙 경로를 우선한다.
+      cost_penalty: 3.0
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
       # global obstacle layer가 사람/침대 주변 포인트로 계속 변한다. 같은 goal의
@@ -463,9 +474,174 @@ velocity_smoother:
     max_velocity: [0.20, 0.0, 0.30]
     # MPPI가 만든 저속 후진 명령을 0으로 잘라버리지 않도록 동일한 하한 적용.
     min_velocity: [-0.10, 0.0, -0.30]
-    max_accel: [0.3, 0.0, 0.5]
-    max_decel: [-0.3, 0.0, -0.5]
+    max_accel: [0.3, 0.0, 0.2]
+    max_decel: [-0.3, 0.0, -0.2]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
+
+# 검증된 공통 근거리 안전 계층. 세 라이다가 base_link로 병합된 cloud를
+# 사용하며, 전진에는 전방·후진에는 후방 raw 제동영역만 활성화한다.
+directional_collision_gate_HY:
+  ros__parameters:
+    use_sim_time: False
+    input_cloud_topic: /livox_merge/merged_pointcloud_sliced
+    cmd_vel_in_topic: /cmd_vel_collision_monitor_in
+    cmd_vel_out_topic: /cmd_vel_collision_monitor_out
+    base_frame: base_link
+    # 출장 병합 cloud의 자차 크롭 경계(±0.90m)에서 생기는 모서리 반사가
+    # 안전영역에 다시 들어오지 않도록 크롭 바깥 5cm부터 감시한다.
+    # 검출 임계값(max_points)은 유지해 사람/장애물 감지 민감도는 낮추지 않는다.
+    front_x_min: 0.95
+    front_x_max: 1.20
+    rear_x_min: -1.20
+    rear_x_max: -0.95
+    # raw 즉시정지는 진행방향 중앙부만 담당한다. 출장 통로의 평행한 우측
+    # 벽이 y=0.42~0.60m에 검출되어, 기존 0.60m 직사각형은 정상 경로도 막았다.
+    # 모서리 정적 장애물은 local costmap/MPPI, 움직이는 측면 물체는 360도
+    # dynamic tracker가 계속 담당한다.
+    zone_y_abs: 0.40
+    min_height: 0.15
+    max_height: 2.0
+    max_points: 3
+    clear_frames: 2
+    direction_deadband: 0.01
+    cloud_timeout: 0.8
+    # 출장 현장 진단용: STOP 포인트가 front/rear/top 중 어느 라이다에서
+    # 들어오는지 base_link 좌표 범위와 함께 launch 로그에 1Hz 이하로 기록한다.
+    source_diagnostics_enabled: False
+    source_diagnostic_names: [front, rear, top]
+    source_diagnostic_topics:
+      - /livox/lidar_192_168_2_102
+      - /livox/lidar_192_168_3_144
+      - /livox/lidar_192_168_1_135
+    source_diagnostic_period: 1.0
+    source_crop_half_x: 0.90
+    source_crop_half_y: 0.55
+
+# 아래 항목은 비교/수치 기록용이며 bringup.launch.py에서는 위 방향 연동
+# Python gate를 실제 raw 안전 계층으로 실행한다.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: False
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_collision_monitor_in
+    cmd_vel_out_topic: cmd_vel_collision_monitor_out
+    transform_tolerance: 0.3
+    source_timeout: 0.8
+    base_shift_correction: True
+    stop_pub_timeout: 1.0
+    polygons: ["FrontStopZone"]
+    FrontStopZone:
+      type: "polygon"
+      points: [1.15, 0.60, 1.15, -0.60, 0.75, -0.60, 0.75, 0.60]
+      action_type: "stop"
+      max_points: 3
+      visualize: True
+      polygon_pub_topic: collision_monitor/front_stop_zone
+      enabled: True
+    observation_sources: ["merged_cloud"]
+    merged_cloud:
+      type: "pointcloud"
+      topic: /livox_merge/merged_pointcloud_sliced
+      min_height: 0.20
+      max_height: 2.0
+      enabled: True
+
+# 움직임이 확인된 객체는 어느 라이다가 감지했든 차체 주변 360도 영역에서
+# 진행 방향과 무관하게 정지시키고, 안전영역 이탈 시 자동 재개한다.
+dynamic_collision_monitor:
+  ros__parameters:
+    use_sim_time: False
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_dynamic_monitor_in
+    cmd_vel_out_topic: cmd_vel_dynamic_monitor_out
+    transform_tolerance: 0.3
+    source_timeout: 0.8
+    base_shift_correction: False
+    stop_pub_timeout: 1.0
+    polygons: ["SurroundDynamicStopZone"]
+    SurroundDynamicStopZone:
+      type: "polygon"
+      points: [2.00, 1.00, 2.00, -1.00, -2.00, -1.00, -2.00, 1.00]
+      action_type: "stop"
+      max_points: 3
+      visualize: True
+      polygon_pub_topic: collision_monitor/surround_dynamic_stop_zone
+      enabled: True
+    observation_sources: ["dynamic_cloud"]
+    dynamic_cloud:
+      type: "pointcloud"
+      topic: /dynamic_obstacles_HY
+      min_height: 0.20
+      max_height: 2.0
+      enabled: True
+
+dynamic_obstacle_tracker_HY:
+  ros__parameters:
+    use_sim_time: False
+    # 출장 플랫폼 전용 CAN/동적정지 보완. HY 파라미터에는 이 값을 넣지 않아
+    # 연구실의 검증된 기존 tracker 동작을 그대로 유지한다.
+    field_hardening_enabled: True
+    input_topic: /livox_merge/merged_pointcloud_sliced
+    output_topic: /dynamic_obstacles_HY
+    tracking_frame: map
+    base_frame: base_link
+    # wheel /odom은 CAN TPDO stale로 멈추고, FAST-LIO /Odometry는 출장 bag에서
+    # 실제 map 이동량을 크게 과소평가해 정적 구조물이 약 0.21m/s로 움직이는
+    # 것처럼 보였다. 동일 stamp의 map 기준 /localization으로 차체 이동을
+    # 보상해 정적 구조물의 DYNAMIC_LATCHED 오검출을 막는다.
+    ego_odom_topic: /localization
+    ego_odom_history_seconds: 5.0
+    # 실측 bag에서 /Odometry가 약 4.8Hz이고 cloud와 가장 가까운 stamp 차이가
+    # p95 약 0.41초였으므로 보간 허용폭과 queue 대기시간을 이에 맞춘다.
+    ego_odom_tolerance: 0.50
+    # 비정상 covariance pose는 사용하지 않는다. 이미 동적으로 latch된
+    # track의 정지 cloud는 heartbeat로 유지한다.
+    ego_odom_max_covariance: 1000.0
+    # 최신 출장 bag의 실제 최대값은 0.341m/s, 0.101rad/s였다. 아래 한계를
+    # 넘으면 실제 주행이 아니라 ICP 좌표 점프로 보고 모든 track/cache를 지운다.
+    ego_pose_max_linear_speed: 0.80
+    ego_pose_max_angular_speed: 0.80
+    ego_odom_recovery_seconds: 0.20
+    roi_x_min: -3.0
+    roi_x_max: 3.0
+    roi_y_abs: 2.0
+    voxel_size: 0.10
+    cluster_tolerance: 0.24
+    min_cluster_voxels: 3
+    max_cluster_extent: 1.50
+    association_distance: 0.40
+    merge_ambiguity_distance: 0.45
+    max_extent_change: 0.35
+    max_point_count_ratio: 3.0
+    # 출장 현장의 정적 의자가 점군/군집 중심 흔들림 0.15m/s, 0.10m만으로
+    # 동적으로 승격된 로그가 있었다. 속도·누적변위·같은 방향의 연속 움직임을
+    # 함께 확인해 정적 장애물은 MPPI가 회피하도록 둔다.
+    dynamic_speed_threshold: 0.18
+    dynamic_min_displacement: 0.12
+    # /Odometry 4.8Hz 기준 두 관측에서 같은 방향 이동이 확인되면 provisional
+    # 360도 정지를 먼저 걸고, 0.6초 연속 이동 시 DYNAMIC_LATCHED로 확정한다.
+    # 정면 raw gate 밖의 우측 대각선/측면/후방 사람도 이 경로로 정지한다.
+    dynamic_confirm_frames: 2
+    dynamic_confirmation_time: 0.60
+    # 확정/후보 장애물의 synthetic cloud를 20Hz로 유지해, CAN odom이 잠시
+    # 끊겨도 Collision Monitor의 0.8초 source timeout으로 정지가 풀리지 않는다.
+    dynamic_cloud_heartbeat_period: 0.05
+    min_motion_direction_cosine: 0.50
+    velocity_filter_alpha: 0.50
+    static_anchor_alpha: 0.05
+    static_track_timeout: 0.8
+    dynamic_lost_hold_time: 2.0
+    # ID가 끊겨도 마지막 위치 주변에 실제 군집이 남으면 정지를 유지하고,
+    # 주변이 1초 연속 clear일 때만 해제한다.
+    lost_track_evidence_radius: 0.60
+    lost_release_clear_time: 1.00
+    surround_stop_zone_x_abs: 2.00
+    surround_stop_zone_y_abs: 1.00
+    synthetic_points_per_track: 6
+    cloud_queue_size: 30
+    cloud_wait_timeout: 1.20

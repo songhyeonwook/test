@@ -65,10 +65,15 @@ def generate_launch_description():
     #               controller -> cmd_vel_nav_raw -> velocity_smoother -> /cmd_vel_nav
     # app:=false -> controller -> cmd_vel_nav -> velocity_smoother -> /cmd_vel (기본, 단독 주행)
     app = LaunchConfiguration('app')
+    collision_monitor = LaunchConfiguration('collision_monitor')
     controller_cmd_vel = PythonExpression(
         ["'cmd_vel_nav_raw' if '", app, "' == 'true' else 'cmd_vel_nav'"])
+    # HY Collision Monitor를 사용할 때만 smoother 출력을 안전 필터 입력으로 보낸다.
+    # 기본값은 false라 기존 출장용 navigation.launch 동작과 토픽은 그대로다.
     smoother_cmd_vel_out = PythonExpression(
-        ["'cmd_vel_nav' if '", app, "' == 'true' else 'cmd_vel'"])
+        ["'cmd_vel_collision_monitor_in' if '", collision_monitor,
+         "' == 'true' else ('cmd_vel_nav' if '", app,
+         "' == 'true' else 'cmd_vel')"])
 
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
@@ -96,6 +101,10 @@ def generate_launch_description():
     declare_app_cmd = DeclareLaunchArgument(
         'app', default_value='false',
         description='true: rbio 앱이 /cmd_vel_nav -> /cmd_vel 중계. Nav2 는 /cmd_vel 을 내지 않는다')
+
+    declare_collision_monitor_cmd = DeclareLaunchArgument(
+        'collision_monitor', default_value='false',
+        description='true: velocity_smoother output을 Collision Monitor 입력으로 보낸다')
 
     declare_use_sim_time_cmd = DeclareLaunchArgument(
         'use_sim_time',
@@ -278,6 +287,7 @@ def generate_launch_description():
     # Declare the launch options
     ld.add_action(declare_namespace_cmd)
     ld.add_action(declare_app_cmd)
+    ld.add_action(declare_collision_monitor_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)

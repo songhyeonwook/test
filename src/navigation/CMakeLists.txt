@@ -15,6 +15,9 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/top_tf_switcher.py
+  scripts/goal_error_recorder_HY.py
+  scripts/dynamic_obstacle_tracker.py
+  scripts/directional_collision_gate_HY.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
